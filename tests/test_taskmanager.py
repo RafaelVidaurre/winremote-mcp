@@ -18,8 +18,9 @@ class TestTaskManager:
     def test_cancel_task(self):
         task = self.tm.create_task("Shell")
         result = self.tm.cancel_task(task.task_id)
-        assert result["status"] == "cancelled"
-        assert task.status == TaskStatus.CANCELLED
+        assert result["status"] == "cancellation_requested"
+        assert task.status == TaskStatus.PENDING
+        assert task.is_cancelled
 
     def test_cancel_nonexistent(self):
         result = self.tm.cancel_task("doesnotexist")
@@ -69,9 +70,11 @@ class TestTaskManager:
             raise RuntimeError("boom")
 
         wrapped = self.tm.wrap_sync_tool("Shell", bad_tool)
-        result = wrapped()
-        assert "Error" in result
-        assert "boom" in result
+        import pytest
+        from fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="boom"):
+            wrapped()
 
     def test_task_duration(self):
         import time

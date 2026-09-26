@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+_local = threading.local()
+
+
+def current_task():
+    return getattr(_local, "task", None)
+
+
 logger = logging.getLogger("winremote.taskmanager")
 
 
@@ -110,6 +117,7 @@ class TaskInfo:
     started_at: float | None = None
     completed_at: float | None = None
     result: Any = None
+    run_id: str | None = None
     error: str | None = None
     _cancel_event: threading.Event = field(default_factory=threading.Event)
 
@@ -124,8 +132,6 @@ class TaskInfo:
         """Request cancellation."""
         if self.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
             self._cancel_event.set()
-            self.status = TaskStatus.CANCELLED
-            self.completed_at = time.time()
             return True
         return False
 
@@ -141,6 +147,7 @@ class TaskInfo:
             "status": self.status.value,
             "duration": self.duration,
             "error": self.error,
+            "run_id": self.run_id,
         }
 
 
@@ -186,7 +193,12 @@ class TaskManager:
             if task is None:
                 return {"error": f"Task {task_id} not found"}
             if task.cancel():
-                return {"status": "cancelled", "task_id": task_id, "tool_name": task.tool_name}
+                return {
+                    "status": "cancellation_requested",
+                    "task_id": task_id,
+                    "tool_name": task.tool_name,
+                    "run_id": task.run_id,
+                }
             return {"error": f"Task {task_id} is already {task.status.value}"}
 
     def list_tasks(self, status: str | None = None) -> list[dict]:
@@ -220,7 +232,7 @@ class TaskManager:
     def wrap_sync_tool(self, tool_name: str, func: Callable) -> Callable:
         """Wrap a synchronous tool function with error handling + concurrency control."""
         category = TOOL_CATEGORIES.get(tool_name, ToolCategory.QUERY)
-        sem = self._thread_semaphores.get(category)
+        sem = None if tool_name == "Shell" else self._thread_semaphores.get(category)
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -231,19 +243,26 @@ class TaskManager:
                 task.status = TaskStatus.FAILED
                 task.error = f"Timeout waiting for {category.value} lock (another {category.value} task is running)"
                 task.completed_at = time.time()
-                return f"[task:{task.task_id}] Error: {task.error}"
+                from fastmcp.exceptions import ToolError
+
+                raise ToolError(f"[task:{task.task_id}] {task.error}")
 
             try:
                 if task.is_cancelled:
-                    return f"[task:{task.task_id}] Cancelled before execution"
+                    from fastmcp.exceptions import ToolError
+
+                    raise ToolError("Cancelled before execution")
 
                 task.status = TaskStatus.RUNNING
                 task.started_at = time.time()
 
+                _local.task = task
                 result = func(*args, **kwargs)
 
                 if task.is_cancelled:
-                    return f"[task:{task.task_id}] Cancelled during execution"
+                    from fastmcp.exceptions import ToolError
+
+                    raise ToolError("Cancelled during execution")
 
                 task.status = TaskStatus.COMPLETED
                 task.completed_at = time.time()
@@ -267,13 +286,16 @@ class TaskManager:
                 return result
 
             except Exception as e:
-                task.status = TaskStatus.FAILED
+                task.status = TaskStatus.CANCELLED if task.is_cancelled else TaskStatus.FAILED
                 task.error = str(e)
                 task.completed_at = time.time()
                 logger.error("Tool %s failed: %s\n%s", tool_name, e, traceback.format_exc())
-                return f"[task:{task.task_id}] Error in {tool_name}: {e}"
+                from fastmcp.exceptions import ToolError
+
+                raise ToolError(f"[task:{task.task_id}] {e}") from e
 
             finally:
+                _local.task = None
                 if sem:
                     sem.release()
 

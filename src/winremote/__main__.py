@@ -498,26 +498,8 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         timeout: Timeout in seconds (default 30).
         cwd: Working directory. If provided, the command runs inside that directory.
     """
-    try:
-        if cwd:
-            safe_cwd = cwd.replace("'", "''")
-            command = f"Set-Location -LiteralPath '{safe_cwd}'; {command}"
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", command],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f"\n[STDERR] {result.stderr}"
-        if result.returncode != 0:
-            output += f"\n[Exit code: {result.returncode}]"
-        return output.strip() or "(no output)"
-    except subprocess.TimeoutExpired:
-        return f"Command timed out after {timeout}s"
-    except Exception as e:
-        return f"Shell error: {e}"
+    from winremote.run_tools import shell
+    return shell(command, timeout, cwd)
 
 
 @mcp.tool(
@@ -1573,7 +1555,10 @@ def AnnotatedSnapshot(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def CancelTask(task_id: str) -> str:
-    """Cancel a running or pending task by its task ID.
+    """Request cancellation of a running or pending task. This is not a cleanup receipt.
+
+    Owned Shell runs expose run_id; inspect RunStatus until cleanup is complete.
+    Other tools support cooperative cancellation only.
 
     Args:
         task_id: The task ID returned when the tool was invoked (e.g. from [task:abc123]).
@@ -1581,7 +1566,9 @@ def CancelTask(task_id: str) -> str:
     result = task_manager.cancel_task(task_id)
     if "error" in result:
         return f"Cancel failed: {result['error']}"
-    return f"Cancelled task {task_id} ({result['tool_name']})"
+    import json
+
+    return json.dumps(result)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1681,15 +1668,23 @@ def _remove_tool(name: str) -> None:
 def _wrap_all_tools():
     """Wrap all registered MCP tools with task manager for error resilience + concurrency."""
     # Skip wrapping the task management tools themselves
-    skip = {"CancelTask", "GetTaskStatus", "GetRunningTasks"}
+    from winremote.run_tools import RUN_TOOLS, protect_tool
+    from winremote.taskmanager import TOOL_CATEGORIES
+    skip = {"CancelTask", "GetTaskStatus", "GetRunningTasks"} | RUN_TOOLS
     for name, tool in _get_registered_tools().items():
         if name in skip:
             continue
         original_fn = getattr(tool, "fn", None)
         if callable(original_fn):
-            tool.fn = task_manager.wrap_sync_tool(name, original_fn)
+            wrapped = task_manager.wrap_sync_tool(name, original_fn)
+            if name != "Shell":
+                wrapped = protect_tool(name, wrapped, TOOL_CATEGORIES.get(name, "query"))
+            tool.fn = wrapped
 
 
+from winremote.run_tools import register as register_runs  # noqa: E402
+
+register_runs(mcp)
 _wrap_all_tools()
 
 

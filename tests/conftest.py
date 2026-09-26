@@ -123,3 +123,8 @@ def _reset_pyautogui(monkeypatch):
         monkeypatch.setattr(pyautogui, "typewrite", MagicMock())
         monkeypatch.setattr(pyautogui, "write", MagicMock())
         monkeypatch.setattr(pyautogui, "position", MagicMock(return_value=(500, 500)))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_run_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("WINREMOTE_RUNS_DIR", str(tmp_path / "winremote-state"))

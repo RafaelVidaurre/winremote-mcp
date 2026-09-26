@@ -1,0 +1,328 @@
+"""Durable, machine-local admission and owned background runs.
+
+SQLite transactions arbitrate all clients. Workers survive client/server exits;
+older conflicting requests prevent starvation without blocking disjoint work.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import math
+import os
+import platform
+import sqlite3
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+import psutil
+
+ACTIVE = {"queued", "running", "cleanup_uncertain"}
+TERMINAL = {"succeeded", "failed", "cancelled", "timeout", "expired", "interrupted"}
+
+
+def state_root() -> Path:
+    return Path(os.environ.get("WINREMOTE_RUNS_DIR", str(Path.home() / ".local/share/winremote/runs"))).resolve()
+
+
+def path_resource(path: str) -> str:
+    return "path:" + os.path.normcase(os.path.normpath(os.path.realpath(path)))
+
+
+def resources_conflict(a: dict, b: dict) -> bool:
+    for x, xm in a.items():
+        for y, ym in b.items():
+            if xm == ym == "shared":
+                continue
+            overlap = x == y
+            if x.startswith("path:") and y.startswith("path:"):
+                xp, yp = x[5:], y[5:]
+                try:
+                    overlap = os.path.commonpath([xp, yp]) in (xp, yp)
+                except ValueError:
+                    pass
+            if overlap:
+                return True
+    return False
+
+
+def conflicts(a: dict, b: dict) -> bool:
+    return (
+        a["isolation"] == "exclusive"
+        or b["isolation"] == "exclusive"
+        or resources_conflict(a["resources"], b["resources"])
+    )
+
+
+def alive(pid: int | None, birth: float | None) -> bool:
+    if not pid or not birth:
+        return False
+    try:
+        p = psutil.Process(pid)
+        return abs(p.create_time() - birth) < 0.01 and p.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.AccessDenied:
+        return True  # uncertainty never permits overlapping admission
+
+
+class Runs:
+    def __init__(self, root: Path | None = None):
+        self.root = (root or state_root()).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.db = self.root / "runs.sqlite3"
+        with self.connect() as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS runs "
+                "(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE, data TEXT)"
+            )
+            db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
+            db.execute("INSERT OR IGNORE INTO metadata VALUES (?, ?)", ("machine_id", uuid.uuid4().hex))
+            machine_id = db.execute("SELECT value FROM metadata WHERE key=?", ("machine_id",)).fetchone()[0]
+        self.machine = {
+            "id": machine_id,
+            "hostname": platform.node(),
+            "os": platform.platform(),
+            "architecture": platform.machine(),
+            "cpu_count": os.cpu_count(),
+            "python": sys.executable,
+            "home": str(Path.home()),
+            "artifact_dir": str(self.root / "artifacts"),
+        }
+
+    @contextlib.contextmanager
+    def connect(self):
+        db = sqlite3.connect(self.db, timeout=15)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            yield db
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @staticmethod
+    def _rows(db):
+        return [json.loads(r[0]) for r in db.execute("SELECT data FROM runs ORDER BY sequence")]
+
+    @staticmethod
+    def _save(db, run):
+        db.execute("UPDATE runs SET data=? WHERE id=?", (json.dumps(run), run["id"]))
+
+    def get(self, run_id: str) -> dict:
+        with self.connect() as db:
+            row = db.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"unknown run: {run_id}")
+        return json.loads(row[0])
+
+    def update(self, run_id: str, **changes) -> dict:
+        with self.connect() as db:
+            row = db.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"unknown run: {run_id}")
+            run = json.loads(row[0])
+            run.update(changes)
+            self._save(db, run)
+        return run
+
+    def list(self, active_only=True, limit=50) -> dict:
+        self.recover()
+        with self.connect() as db:
+            rows = self._rows(db)
+        if active_only:
+            rows = [r for r in rows if r["state"] in ACTIVE]
+        return {"machine": self.machine, "runs": rows[-min(max(limit, 1), 200) :]}
+
+    def submit(
+        self,
+        command: list[str],
+        cwd: str,
+        owner: str,
+        *,
+        resources: dict | None = None,
+        isolation="shared",
+        workspace_access="exclusive",
+        timeout=60.0,
+        queue_timeout=1800.0,
+        request_id: str | None = None,
+        env: dict | None = None,
+        hidden=True,
+        spawn=True,
+    ) -> dict:
+        if not command or any(not isinstance(s, str) or not s or "\x00" in s for s in command):
+            raise ValueError("command must be a nonempty argv array")
+        if not owner or len(owner) > 200:
+            raise ValueError("owner must name the project/session (1..200 characters)")
+        if not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+            raise ValueError("cwd must be an existing absolute directory")
+        for value in (timeout, queue_timeout):
+            if not math.isfinite(value) or not 0 < value <= 86400:
+                raise ValueError("timeouts must be finite, positive and <=86400 seconds")
+        if isolation not in ("shared", "exclusive") or workspace_access not in ("shared", "exclusive"):
+            raise ValueError("isolation and workspace_access must be shared or exclusive")
+        claims = {}
+        for name, mode in (resources or {}).items():
+            if not isinstance(name, str) or not name or len(name) > 1024 or mode not in ("shared", "exclusive"):
+                raise ValueError("resources map nonempty names to shared/exclusive")
+            if name.startswith("path:"):
+                if not Path(name[5:]).is_absolute():
+                    raise ValueError("path resources must be absolute")
+                name = path_resource(name[5:])
+            claims[name] = mode
+        workspace = path_resource(cwd)
+        claims[workspace] = "exclusive" if claims.get(workspace) == "exclusive" else workspace_access
+        if any(
+            not isinstance(k, str) or not isinstance(v, str) or "=" in k or "\x00" in k + v
+            for k, v in (env or {}).items()
+        ):
+            raise ValueError("env must contain valid string names and values")
+        spec = dict(
+            command=command,
+            cwd=str(Path(cwd).resolve()),
+            owner=owner,
+            resources=claims,
+            isolation=isolation,
+            timeout=timeout,
+            queue_timeout=queue_timeout,
+            env=env or {},
+            hidden=hidden,
+        )
+        fingerprint = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+        if request_id is not None and (not request_id or len(request_id) > 200):
+            raise ValueError("request_id must have 1..200 characters")
+        with self.connect() as db:
+            if request_id:
+                for old in self._rows(db):
+                    if old.get("request_id") == request_id and old["owner"] == owner:
+                        if old["fingerprint"] != fingerprint:
+                            raise ValueError("request_id already names a different request")
+                        return old
+            run_id = uuid.uuid4().hex
+            out = self.root / run_id
+            out.mkdir()
+            run = dict(
+                spec,
+                id=run_id,
+                request_id=request_id,
+                fingerprint=fingerprint,
+                state="queued",
+                created_at=time.time(),
+                machine=self.machine,
+                output_dir=str(out),
+                cancel_requested=False,
+                worker_pid=None,
+                worker_birth=None,
+                cleanup="pending",
+                kind="run",
+            )
+            db.execute("INSERT INTO runs(id,data) VALUES (?,?)", (run_id, json.dumps(run)))
+        if spawn:
+            try:
+                with (out / "worker.log").open("ab") as log:
+                    kwargs = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, close_fds=True)
+                    if os.name == "nt":
+                        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                    else:
+                        kwargs["start_new_session"] = True
+                    subprocess.Popen([sys.executable, "-m", "winremote.run_worker", str(self.root), run_id], **kwargs)
+            except BaseException as exc:
+                self.update(run_id, state="failed", error=str(exc), cleanup="complete", finished_at=time.time())
+                raise
+        return self.get(run_id)
+
+    def admit(self, run_id: str) -> bool:
+        self.recover()
+        with self.connect() as db:
+            rows = self._rows(db)
+            current = next(r for r in rows if r["id"] == run_id)
+            if current["state"] != "queued":
+                return False
+            if current["cancel_requested"]:
+                current.update(state="cancelled", cleanup="complete", finished_at=time.time())
+            elif time.time() > current["created_at"] + current["queue_timeout"]:
+                current.update(state="expired", cleanup="complete", finished_at=time.time())
+            else:
+                for other in rows:
+                    if other["id"] == run_id:
+                        break
+                    if other["state"] in ACTIVE and conflicts(current, other):
+                        return False
+                if any(
+                    r["id"] != run_id and r["state"] in ("running", "cleanup_uncertain") and conflicts(current, r)
+                    for r in rows
+                ):
+                    return False
+                current.update(state="running", started_at=time.time())
+                self._save(db, current)
+                return True
+            self._save(db, current)
+        return False
+
+    def cancel(self, run_id: str, owner: str) -> dict:
+        run = self.get(run_id)
+        if run["owner"] != owner:
+            raise ValueError("owner does not match; use the recorded owner only with authority to cancel that run")
+        with self.connect() as db:
+            run = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()[0])
+            if run["state"] in ACTIVE:
+                run["cancel_requested"] = True
+                if run["state"] == "queued":
+                    run.update(state="cancelled", cleanup="complete", finished_at=time.time())
+                self._save(db, run)
+        return run
+
+    def recover(self):
+        """Reconcile a dead worker; uncertain cleanup retains every resource claim."""
+        with self.connect() as db:
+            for run in self._rows(db):
+                if run["state"] not in ACTIVE:
+                    continue
+                if run.get("worker_pid") and alive(run["worker_pid"], run["worker_birth"]):
+                    continue
+                if not run.get("worker_pid") and time.time() - run["created_at"] < 30:
+                    continue  # worker startup handshake
+                if run["kind"] == "lease" or run["state"] == "queued":
+                    run.update(state="interrupted", cleanup="complete", finished_at=time.time())
+                else:
+                    from winremote.run_worker import tree_absent
+
+                    if tree_absent(run):
+                        run.update(state="interrupted", cleanup="complete", finished_at=time.time())
+                    else:
+                        run.update(state="cleanup_uncertain", cleanup="uncertain")
+                self._save(db, run)
+
+    @contextlib.contextmanager
+    def operation(self, name: str, resources: dict | None = None):
+        """Short existing tools fail fast during conflicts instead of building hidden queues."""
+        self.recover()
+        run = dict(
+            id=uuid.uuid4().hex,
+            owner="mcp:" + name,
+            kind="lease",
+            isolation="shared",
+            resources=resources or {},
+            state="running",
+            created_at=time.time(),
+            worker_pid=os.getpid(),
+            worker_birth=psutil.Process().create_time(),
+            cleanup="pending",
+        )
+        with self.connect() as db:
+            blockers = [r for r in self._rows(db) if r["state"] in ACTIVE and conflicts(run, r)]
+            if blockers:
+                raise RuntimeError("host_busy: " + ", ".join(r["id"] + " (" + r["owner"] + ")" for r in blockers[:3]))
+            db.execute("INSERT INTO runs(id,data) VALUES (?,?)", (run["id"], json.dumps(run)))
+        try:
+            yield
+        finally:
+            # Short tool calls need admission, not permanent history per binary chunk.
+            with self.connect() as db:
+                db.execute("DELETE FROM runs WHERE id=?", (run["id"],))

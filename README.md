@@ -27,6 +27,10 @@ That's it! Your Windows MCP server is now running on `http://127.0.0.1:8090` and
 
 ## 🤖 Agent Integrations
 
+This maintained build includes [durable runs and artifact transfer](docs/host-runs.md):
+`winremote-client` submits owned jobs with conflict-aware concurrency, transfers
+verified binary files over MCP, and stages source into new checkouts.
+
 winremote-mcp works with MCP-compatible AI agents and clients. Client-specific setup guides live in this repo:
 
 - [Hermes](skill/hermes/) — add winremote as a native streamable HTTP or stdio MCP server.

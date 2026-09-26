@@ -17,25 +17,35 @@ def _call_tool(tool_name, **kwargs):
 
 
 class TestShell:
-    @patch("subprocess.run")
-    def test_shell_success(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="hello", stderr="", returncode=0)
-        result = _call_tool("Shell", command="echo hello")
-        assert "hello" in result
+    def test_long_commands_require_owned_async_runs(self):
+        import pytest
+        from fastmcp.exceptions import ToolError
 
-    @patch("subprocess.run")
-    def test_shell_stderr(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="", stderr="error msg", returncode=1)
-        result = _call_tool("Shell", command="bad")
-        assert "STDERR" in result or "error" in result.lower()
+        with pytest.raises(ToolError, match="RunSubmit"):
+            _call_tool("Shell", command="irrelevant", timeout=61)
 
-    @patch("subprocess.run")
-    def test_shell_timeout(self, mock_run):
-        import subprocess
+    def test_native_shell_timeout_cleans_up_and_next_call_works(self):
+        import os
 
-        mock_run.side_effect = subprocess.TimeoutExpired("cmd", 30)
-        result = _call_tool("Shell", command="long", timeout=30)
-        assert "timed out" in result.lower()
+        import pytest
+        from fastmcp.exceptions import ToolError
+
+        if os.name != "nt":
+            pytest.skip("requires native PowerShell and Windows Job Objects")
+        with pytest.raises(ToolError, match='"cleanup": "complete"'):
+            _call_tool("Shell", command="Start-Sleep 20", timeout=1)
+        assert "native hello" in _call_tool("Shell", command="Write-Output 'native hello'", timeout=10)
+
+    def test_native_shell_exit_failure_is_an_mcp_error(self):
+        import os
+
+        import pytest
+        from fastmcp.exceptions import ToolError
+
+        if os.name != "nt":
+            pytest.skip("requires native PowerShell")
+        with pytest.raises(ToolError, match='"exit_code": 7'):
+            _call_tool("Shell", command="Write-Output 'failed command'; exit 7", timeout=10)
 
 
 class TestScrape:
