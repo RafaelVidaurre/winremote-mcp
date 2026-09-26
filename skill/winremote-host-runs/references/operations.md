@@ -7,14 +7,12 @@ stay in local configuration; do not put them in requests, logs or notifications.
 The native tools are `RunSubmit`, `RunList`, `RunStatus`, `RunCancel`, `RunLog`,
 `UploadBegin/Chunk/Finish` and `ArtifactInfo/Read`.
 
-## Installation
+## Installation and maintenance
 
-The installed client and Windows server must both include the durable-run
-extension. `~/.local/share/winremote/installation.json`, when present, records
-this machine's maintained source checkout, installed version and deployment
-artifacts. The implementation belongs in winremote, not a consuming project.
-When changing it, use that source checkout and its scoped tests. A missing
-capability is an installation failure, not permission to improvise a launcher.
+Read [setup and upgrades](setup.md) when installing, repairing or upgrading
+either side. It explains the modified build, installation receipts, package
+commands and capability checks. A missing capability is an installation
+failure, not permission to improvise a launcher.
 
 For Windows scheduled-task server maintenance, use the maintained
 `tools/restart-server-task.ps1` from the implementation checkout through

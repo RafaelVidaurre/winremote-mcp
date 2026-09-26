@@ -1,12 +1,18 @@
 ---
 name: winremote-host-runs
-description: Run project workloads and transfer artifacts through winremote MCP with durable ownership and conflict-aware concurrency. Use for Windows-host tests, builds, imports, captures and benchmarks, or when coordinating those workloads with local-machine runs.
+description: Run project workloads and transfer artifacts through winremote MCP with durable ownership and conflict-aware concurrency. Use for Windows-host tests, builds, imports, captures and benchmarks, coordinating local runs, or installing and upgrading the modified winremote server and client.
 ---
 
 # Owned host runs
 
 Use winremote's durable run queue and file-oriented MCP client. Project commands
 remain responsible for application startup, test selection and acceptance.
+
+This skill requires our modified winremote build on the Windows server and the
+matching local client. Its queue, owned jobs and verified transfers are maintained
+in our local fork. Before installation, repair or upgrade, read
+[setup and upgrades](references/setup.md); replacing it with an upstream release
+can remove those capabilities.
 
 ## Choose the workload and its conflicts
 
