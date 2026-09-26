@@ -21,9 +21,18 @@ $remaining = Get-CimInstance Win32_Process -Filter "ProcessId = $oldId"
 if ($remaining -and $remaining.CreationDate -eq $oldCreated) {
     Stop-Process -Id $oldId -ErrorAction Stop
 }
-if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
-    throw 'Listener remained or changed; refusing a second server'
-}
+# Stop-Process returns before Windows necessarily releases the listening socket.
+# Wait for the observed owner; never stop a replacement or race a second bind.
+$deadline = [DateTime]::UtcNow.AddSeconds(15)
+do {
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if (@($listeners | Where-Object OwningProcess -ne $oldId).Count) {
+        throw 'A different process claimed the port; nothing else stopped'
+    }
+    if ($listeners.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 100
+} while ([DateTime]::UtcNow -lt $deadline)
+if ($listeners.Count) { throw 'Original listener did not close within 15 seconds' }
 Start-ScheduledTask -TaskName $TaskName
 $deadline = [DateTime]::UtcNow.AddSeconds(25)
 do {

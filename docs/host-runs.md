@@ -48,11 +48,12 @@ Validation: `python -m pytest tests/test_host_runs.py tests/test_taskmanager.py
  tests/test_shell_tools.py tests/test_config_and_tiers.py tests/test_integration.py`.
 Run on Windows for native Job Object, worker-crash and PowerShell evidence.
 
-For a server installed as a Windows scheduled task, use
+For a server installed as a Windows scheduled task, invoke
 `tools/restart-server-task.ps1` through RunSubmit with its exact task name,
-port and expected server command fragment. First check that maintenance will
-not interrupt unrelated work. Stopping a console-wrapper task alone can leave
-the server alive; the script verifies the listener's process identity before
-stopping it and requires a new listener afterward. Verify RunList and a real
-owned command after reconnecting. Never infer successful activation from the
-task's restart receipt alone.
+port and expected server command fragment. Check for unrelated work before
+maintenance. Console wrappers can leave their server alive, and process
+termination can precede socket release. The script verifies the original
+listener's identity, waits for its socket to close, refuses a different owner,
+and requires a new listener. Verify RunList and an owned command after
+reconnecting. The Windows regression test in `tests/test_server_restart.py`
+uses a disposable task whose listening socket outlives the original process.
