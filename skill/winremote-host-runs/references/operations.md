@@ -5,7 +5,7 @@ and the existing Codex/Claude `winremote` HTTP connection configuration. An
 explicit `--config` JSON file can select another configured host. Credentials
 stay in local configuration; do not put them in requests, logs or notifications.
 The native tools are `RunSubmit`, `RunList`, `RunStatus`, `RunCancel`, `RunLog`,
-`UploadBegin/Chunk/Finish` and `ArtifactInfo/Read`.
+`RunSnapshot`, `UploadBegin/Chunk/Finish` and `ArtifactInfo/Read`.
 
 ## Installation and maintenance
 
@@ -74,6 +74,35 @@ the job. Recovery verifies absence before releasing claims. Local POSIX runs
 use owned process groups. Deliberately escaping containment, external service
 creation and unrelated user processes are outside a command's cleanup promise;
 such work needs its own explicit lifecycle and resource declaration.
+
+## Observe your own held run
+
+A plain `Snapshot` or file read against a held claim fails with `host_busy`,
+including your own run. `RunSubmit` returns a one-time `observer_token` for the
+new run; only its digest is stored. Status, listings and request_id retries never
+return it. Keep it private:
+
+```sh
+winremote-client submit request.json --observer-token-out ./evidence/run-17.observer
+winremote-client snapshot <run-id> ./evidence/run-17-desktop.jpg \
+  --observer-token-file ./evidence/run-17.observer
+winremote-client log <run-id> --path 'C:\Users\me\AppData\Roaming\Godot\app_userdata\App\logs\godot.log' \
+  --offset 0 --observer-token-file ./evidence/run-17.observer
+```
+
+The client never prints the token. Without `--observer-token-out` it is withheld,
+and observation of that run is unavailable. Observation is read-only and only
+while the run is `running` or `cleanup_uncertain`:
+
+- `RunSnapshot` needs a `desktop` claim held by that run.
+- A `RunLog` path must lie inside one of the run's path claims or its output
+  directory, and is read as a growing file by byte offset.
+
+The owning run and queued requests do not block the observation; any other held
+conflicting claim still returns `host_busy`. Each admitted observation appends a
+nonsecret receipt (time, run, machine, tool, bytes, SHA-256) to the run's
+`observations.jsonl`. Capturing during a whole-machine exclusive measurement
+perturbs it, so observe outside measured windows.
 
 ## Source and evidence
 

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import json
 import math
 import os
 import platform
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -22,6 +24,7 @@ from pathlib import Path
 import psutil
 
 ACTIVE = {"queued", "running", "cleanup_uncertain"}
+HELD = {"running", "cleanup_uncertain"}
 TERMINAL = {"succeeded", "failed", "cancelled", "timeout", "expired", "interrupted"}
 
 
@@ -48,6 +51,33 @@ def resources_conflict(a: dict, b: dict) -> bool:
             if overlap:
                 return True
     return False
+
+
+def covers(held: dict, claims: dict, output_dir: str | None = None) -> bool:
+    """Every claim names something the held run already owns (paths by containment)."""
+    owned = [name for name in held if name.startswith("path:")]
+    if output_dir:
+        owned.append(path_resource(output_dir))
+    for name in claims:
+        if name.startswith("path:"):
+            target = name[5:]
+            inside = False
+            for root in owned:
+                try:
+                    inside = os.path.commonpath([target, root[5:]]) == root[5:]
+                except ValueError:
+                    inside = False
+                if inside:
+                    break
+            if not inside:
+                return False
+        elif name not in held:
+            return False
+    return True
+
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def conflicts(a: dict, b: dict) -> bool:
@@ -207,6 +237,9 @@ class Runs:
             run_id = uuid.uuid4().hex
             out = self.root / run_id
             out.mkdir()
+            # Observation authority is a capability issued with this exact admission.
+            # Only its digest is durable, so status, listings and retries cannot reveal it.
+            observer_token = secrets.token_urlsafe(32)
             run = dict(
                 spec,
                 id=run_id,
@@ -221,6 +254,7 @@ class Runs:
                 worker_birth=None,
                 cleanup="pending",
                 kind="run",
+                observer_token_sha256=token_digest(observer_token),
             )
             db.execute("INSERT INTO runs(id,data) VALUES (?,?)", (run_id, json.dumps(run)))
         if spawn:
@@ -235,7 +269,7 @@ class Runs:
             except BaseException as exc:
                 self.update(run_id, state="failed", error=str(exc), cleanup="complete", finished_at=time.time())
                 raise
-        return self.get(run_id)
+        return dict(self.get(run_id), observer_token=observer_token)
 
     def admit(self, run_id: str) -> bool:
         self.recover()
@@ -299,9 +333,41 @@ class Runs:
                         run.update(state="cleanup_uncertain", cleanup="uncertain")
                 self._save(db, run)
 
+    @staticmethod
+    def record_observation(owner: dict, tool: str, details: dict) -> None:
+        """Append a nonsecret receipt correlating an observation with the held run."""
+        receipt = dict(
+            time=time.time(),
+            run_id=owner["id"],
+            machine_id=owner["machine"]["id"],
+            run_state=owner["state"],
+            tool=tool,
+            **details,
+        )
+        with (Path(owner["output_dir"]) / "observations.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(receipt, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _observed(rows: list, within: tuple[str, str], claims: dict) -> dict:
+        run_id, token = within
+        owner = next((r for r in rows if r["id"] == run_id and r.get("kind") == "run"), None)
+        expected = (owner or {}).get("observer_token_sha256")
+        if not expected or not isinstance(token, str) or not hmac.compare_digest(token_digest(token), expected):
+            raise PermissionError("observation_denied: unknown run or observer token")
+        if owner["state"] not in HELD:
+            raise PermissionError(f"observation_denied: run is {owner['state']}, its claims are not held")
+        if not covers(owner["resources"], claims, owner.get("output_dir")):
+            raise PermissionError("observation_denied: requested resources are outside the run's claims")
+        return owner
+
     @contextlib.contextmanager
-    def operation(self, name: str, resources: dict | None = None):
-        """Short existing tools fail fast during conflicts instead of building hidden queues."""
+    def operation(self, name: str, resources: dict | None = None, within: tuple[str, str] | None = None):
+        """Short existing tools fail fast during conflicts instead of building hidden queues.
+
+        within=(run_id, observer_token) nests a read-only observation inside that run's held
+        claims. Only claims the run already owns are admitted; the owning run and queued
+        requests do not block it, and every other held conflicting run still does.
+        """
         self.recover()
         run = dict(
             id=uuid.uuid4().hex,
@@ -315,13 +381,20 @@ class Runs:
             worker_birth=psutil.Process().create_time(),
             cleanup="pending",
         )
+        owner = None
         with self.connect() as db:
-            blockers = [r for r in self._rows(db) if r["state"] in ACTIVE and conflicts(run, r)]
+            rows = self._rows(db)
+            if within is None:
+                blockers = [r for r in rows if r["state"] in ACTIVE and conflicts(run, r)]
+            else:
+                owner = self._observed(rows, within, run["resources"])
+                run["observing"] = owner["id"]
+                blockers = [r for r in rows if r["id"] != owner["id"] and r["state"] in HELD and conflicts(run, r)]
             if blockers:
                 raise RuntimeError("host_busy: " + ", ".join(r["id"] + " (" + r["owner"] + ")" for r in blockers[:3]))
             db.execute("INSERT INTO runs(id,data) VALUES (?,?)", (run["id"], json.dumps(run)))
         try:
-            yield
+            yield owner
         finally:
             # Short tool calls need admission, not permanent history per binary chunk.
             with self.connect() as db:

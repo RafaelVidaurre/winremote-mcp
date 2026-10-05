@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -113,6 +114,125 @@ async def download(client, remote: str, local: Path):
     return dict(path=str(local), size=info["size"], sha256=info["sha256"], complete=True)
 
 
+def reserve_observer_token_file(path: str | None):
+    """Create the new private token file before admission, so a bad target refuses early."""
+    if not path:
+        return None
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), target
+
+
+def _remove_private_file(target: Path, only_if_empty: bool) -> str:
+    """Report the actual removal outcome; never assume a private file is gone."""
+    try:
+        if only_if_empty and target.stat().st_size != 0:
+            return f"retained: {target} is not empty"
+        target.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return f"failed: {type(exc).__name__} removing; private file retained at {target}"
+    return "removed"
+
+
+def _close_then_remove(fd: int, target: Path, only_if_empty: bool) -> str:
+    """Close before removal: Windows cannot delete a file through an open ordinary handle."""
+    try:
+        os.close(fd)
+    except OSError as exc:
+        return f"failed: {type(exc).__name__} closing; private file retained at {target}"
+    return _remove_private_file(target, only_if_empty)
+
+
+def release_observer_token_file(reservation) -> str | None:
+    """Remove this client's own still-empty reservation; never touches other files."""
+    if reservation is None:
+        return None
+    fd, target = reservation
+    return _close_then_remove(fd, target, only_if_empty=True)
+
+
+def keep_observer_token(result: dict, reservation=None) -> dict:
+    """Never print the run's observer capability; persist it only into a reserved file.
+
+    The run is already admitted here. A persistence failure keeps the exact run receipt
+    and marks the lost capability instead of discarding the custody record.
+    """
+    token = result.pop("observer_token", None)
+    if reservation is None:
+        if token is not None:
+            result["observer_token"] = "withheld; use --observer-token-out to keep it"
+        return result
+    fd, target = reservation
+    if token is None:
+        result["observer_token"] = "not issued: existing request_id or server without observation"
+        result["observer_token_cleanup"] = release_observer_token_file(reservation)
+        return result
+    failure = None
+    try:
+        data = token.encode()
+        while data:
+            written = os.write(fd, data)
+            if written <= 0:
+                raise OSError("token write made no progress")
+            data = data[written:]
+        os.fsync(fd)
+    except OSError as exc:
+        failure = exc
+    if failure is None:
+        try:
+            os.close(fd)
+        except OSError as exc:
+            failure = exc
+        else:
+            result["observer_token"] = "written to " + str(target)
+            return result
+        cleanup = _remove_private_file(target, only_if_empty=False)
+    else:
+        # A partial capability is useless; close, then remove only this client's own file.
+        cleanup = _close_then_remove(fd, target, only_if_empty=False)
+    result["observer_token"] = f"lost: {type(failure).__name__} while persisting; the run is unaffected"
+    result["observer_token_persistence"] = "failed"
+    result["observer_token_cleanup"] = cleanup
+    return result
+
+
+async def submit_with_custody(client, request: dict, token_out: str | None) -> dict:
+    reservation = reserve_observer_token_file(token_out)
+    try:
+        result = await call(client, "RunSubmit", request)
+    except BaseException:
+        release_observer_token_file(reservation)
+        raise
+    return keep_observer_token(result, reservation)
+
+
+def read_observer_token(path: str) -> str:
+    return Path(path).expanduser().read_text(encoding="utf-8").strip()
+
+
+async def snapshot(client, run_id: str, token: str, local: Path, monitor=0, max_width=0, quality=75):
+    """Save a held run's RunSnapshot JPEG locally; image bytes never enter model text."""
+    result = await client.call_tool(
+        "RunSnapshot",
+        dict(run_id=run_id, observer_token=token, monitor=monitor, max_width=max_width, quality=quality),
+        timeout=90,
+    )
+    if result.is_error:
+        raise RuntimeError("RunSnapshot failed: " + " ".join(getattr(c, "text", "") for c in result.content))
+    image = next(c for c in result.content if getattr(c, "type", None) == "image")
+    summary = json.loads(next(c.text for c in result.content if getattr(c, "type", None) == "text"))
+    raw = base64.b64decode(image.data, validate=True)
+    if hashlib.sha256(raw).hexdigest() != summary["sha256"]:
+        raise ValueError("snapshot bytes do not match the run's observation receipt")
+    local = local.expanduser().resolve()
+    local.parent.mkdir(parents=True, exist_ok=True)
+    with local.open("xb") as f:
+        f.write(raw)
+    return dict(summary, path=str(local))
+
+
 async def wait(client, run_id, seconds):
     deadline = time.monotonic() + seconds
     while True:
@@ -148,6 +268,16 @@ async def remote_main(args):
             return await download(client, args.source, Path(args.destination))
         if args.action == "wait":
             return await wait(client, args.run_id, args.seconds)
+        if args.action == "snapshot":
+            return await snapshot(
+                client,
+                args.run_id,
+                read_observer_token(args.observer_token_file),
+                Path(args.destination),
+                args.monitor,
+                args.max_width,
+                args.quality,
+            )
         if args.action == "stage":
             host = (await call(client, "RunList"))["machine"]
             with tempfile.TemporaryDirectory(prefix="winremote-bundle-") as temp:
@@ -155,7 +285,7 @@ async def remote_main(args):
                 sha, ref = make_bundle(args.source, args.commit, args.base, bundle)
                 remote = host["artifact_dir"].rstrip("\\/") + "/source-" + digest(bundle) + ".bundle"
                 await upload(client, bundle, remote)
-            return await call(
+            staged = await call(
                 client,
                 "RunSubmit",
                 dict(
@@ -181,8 +311,13 @@ async def remote_main(args):
                     resources={"path:" + args.repository: "exclusive", "path:" + args.checkout: "exclusive"},
                 ),
             )
+            return keep_observer_token(staged)
         if args.action == "call":
-            return await call(client, args.tool, json.loads(Path(args.args_file).read_text()) if args.args_file else {})
+            request = json.loads(Path(args.args_file).read_text()) if args.args_file else {}
+            result = await call(client, args.tool, request)
+            return keep_observer_token(result) if isinstance(result, dict) else result
+        if args.action == "submit":
+            return await submit_with_custody(client, json.loads(Path(args.spec).read_text()), args.observer_token_out)
         return await call(client, *api_request(args))
 
 
@@ -194,9 +329,12 @@ def api_request(args):
     if args.action == "cancel":
         return "RunCancel", {"run_id": args.run_id, "owner": args.owner}
     if args.action == "log":
-        return "RunLog", {"run_id": args.run_id, "offset": args.offset, "limit": args.limit}
-    if args.action == "submit":
-        return "RunSubmit", json.loads(Path(args.spec).read_text())
+        request = {"run_id": args.run_id, "offset": args.offset, "limit": args.limit}
+        if args.path:
+            if not args.observer_token_file:
+                raise ValueError("log --path requires --observer-token-file")
+            request.update(path=args.path, observer_token=read_observer_token(args.observer_token_file))
+        return "RunLog", request
     raise ValueError("unsupported action")
 
 
@@ -210,7 +348,13 @@ def local_main(args):
     if args.action == "cancel":
         return runs.cancel(args.run_id, args.owner)
     if args.action == "submit":
-        return runs.submit(**json.loads(Path(args.spec).read_text()))
+        reservation = reserve_observer_token_file(args.observer_token_out)
+        try:
+            result = runs.submit(**json.loads(Path(args.spec).read_text()))
+        except BaseException:
+            release_observer_token_file(reservation)
+            raise
+        return keep_observer_token(result, reservation)
     if args.action == "wait":
         deadline = time.monotonic() + args.seconds
         while True:
@@ -229,6 +373,7 @@ def cli():
     sub = parser.add_subparsers(dest="action", required=True)
     p = sub.add_parser("submit", help="Submit a JSON RunSubmit specification")
     p.add_argument("spec")
+    p.add_argument("--observer-token-out", help="New 0600 file for the run's observer token (never printed)")
     p = sub.add_parser("list")
     p.add_argument("--all", action="store_true")
     p = sub.add_parser("status")
@@ -243,6 +388,15 @@ def cli():
     p.add_argument("run_id")
     p.add_argument("--offset", type=int, default=0)
     p.add_argument("--limit", type=int, default=8192)
+    p.add_argument("--path", help="Live file inside the held run's own path claims")
+    p.add_argument("--observer-token-file")
+    p = sub.add_parser("snapshot", help="Save a read-only desktop snapshot of a held run that claims desktop")
+    p.add_argument("run_id")
+    p.add_argument("destination")
+    p.add_argument("--observer-token-file", required=True)
+    p.add_argument("--monitor", type=int, default=0)
+    p.add_argument("--max-width", type=int, default=0)
+    p.add_argument("--quality", type=int, default=75)
     for action in ("upload", "download"):
         p = sub.add_parser(action)
         p.add_argument("source")
@@ -261,6 +415,8 @@ def cli():
     try:
         result = local_main(args) if args.local else asyncio.run(remote_main(args))
         print(json.dumps(result, indent=2))
+        if result.get("observer_token_persistence") == "failed":
+            return 1
         if result.get("state") in ("failed", "timeout", "expired", "cancelled", "interrupted", "cleanup_uncertain"):
             return 1
         if args.action == "wait" and result.get("state") in ACTIVE:

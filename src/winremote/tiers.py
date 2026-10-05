@@ -38,7 +38,7 @@ TOOL_TIERS = {
         "ReconnectSession",
     },
     "tier3": {
-        "RunSubmit", "RunStatus", "RunCancel", "RunList", "RunLog",
+        "RunSubmit", "RunStatus", "RunCancel", "RunList", "RunLog", "RunSnapshot",
         "UploadBegin", "UploadChunk", "UploadFinish", "ArtifactInfo", "ArtifactRead",
         "Shell",
         "App",

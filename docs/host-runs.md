@@ -33,6 +33,21 @@ A repeated owner/request_id is idempotent only with an identical specification.
 Owner is attribution within the server's authenticated trust domain, not an
 additional authorization boundary.
 
+RunSubmit returns a one-time observer token for a new run; only its SHA-256 is
+stored, so RunStatus, RunList and idempotent retries never return it. While that
+run is running or cleanup_uncertain, the token admits read-only observation
+nested in the run's own claims:
+
+- RunSnapshot gives a screenshot and window list, and requires the run's desktop
+  claim.
+- RunLog with `path` gives a growing-file byte tail inside the run's path claims
+  or output directory.
+
+The owning run and queued requests do not block these leases; every other held
+conflicting run still yields host_busy. Out-of-claim, wrong-token and released-run
+requests return observation_denied. Receipts go to the run's
+`observations.jsonl`. Ordinary tools and their host_busy behaviour are unchanged.
+
 UploadBegin/Chunk/Finish and ArtifactInfo/Read provide resumable file transfer.
 The CLI handles bytes; neither agent context nor manual encoding is involved.
 Publication follows full length/hash verification and refuses an existing

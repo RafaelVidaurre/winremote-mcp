@@ -85,7 +85,11 @@ the benchmark identity. Keep known working deployment artifacts for recovery.
 ## Verify activation
 
 Require a successful RunList call, the expected machine ID and native tools
-RunSubmit/Status/Cancel/Log, UploadBegin/Chunk/Finish and ArtifactInfo/Read.
+RunSubmit/Status/Cancel/Log, RunSnapshot, UploadBegin/Chunk/Finish and
+ArtifactInfo/Read, with RunLog exposing `path` and `observer_token`. For a build with
+held-run observation, submit one short visible owned run that claims `desktop` with
+`--observer-token-out`, then require `winremote-client snapshot` to save a JPEG
+matching its receipt and a plain `Snapshot` to return `host_busy` while it is held.
 Run one short owned command through the installed client and require terminal
 success with `cleanup: complete`. Round-trip a small binary and compare hashes.
 Verify `--local` with its separate machine ID when installing the local runner.

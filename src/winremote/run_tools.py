@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import functools
+import hashlib
 import inspect
+import json
 import os
 import time
 from pathlib import Path
 
 from fastmcp.exceptions import ToolError
+from mcp.types import ImageContent, TextContent
 
 from winremote.artifacts import Artifacts
 from winremote.runs import Runs, path_resource
@@ -19,6 +23,7 @@ RUN_TOOLS = {
     "RunCancel",
     "RunList",
     "RunLog",
+    "RunSnapshot",
     "UploadBegin",
     "UploadChunk",
     "UploadFinish",
@@ -82,17 +87,84 @@ def register(mcp):
         return Runs().cancel(run_id, owner)
 
     @mcp.tool()
-    def RunLog(run_id: str, offset: int = 0, limit: int = 8192) -> dict:
-        """Read a bounded stdout/stderr excerpt by byte offset. Full bytes stay in output.log."""
+    def RunLog(
+        run_id: str,
+        offset: int = 0,
+        limit: int = 8192,
+        path: str | None = None,
+        observer_token: str | None = None,
+    ) -> dict:
+        """Read a bounded stdout/stderr excerpt by byte offset. Full bytes stay in output.log.
+
+        With path and the run's observer_token, tail a live file inside that held run's own
+        path claims (for example an application log) without waiting for the run to release.
+        """
         if offset < 0 or not 1 <= limit <= 65536:
             raise ValueError("offset >=0 and limit 1..65536 required")
-        path = Path(Runs().get(run_id)["output_dir"]) / "output.log"
-        if not path.exists():
-            return {"text": "", "next_offset": offset}
-        with path.open("rb") as f:
-            f.seek(offset)
-            raw = f.read(limit)
-        return {"text": raw.decode("utf-8", errors="replace"), "next_offset": offset + len(raw)}
+        runs = Runs()
+        if path is None:
+            log = Path(runs.get(run_id)["output_dir"]) / "output.log"
+            if not log.exists():
+                return {"text": "", "next_offset": offset}
+            with log.open("rb") as f:
+                f.seek(offset)
+                raw = f.read(limit)
+            return {"text": raw.decode("utf-8", errors="replace"), "next_offset": offset + len(raw)}
+        if not Path(path).is_absolute():
+            raise ValueError("path must be absolute")
+        target = Path(path).resolve()
+        with runs.operation("RunLog", {path_resource(str(target)): "shared"}, within=(run_id, observer_token)) as owner:
+            if not target.exists():
+                raw, size = b"", 0
+            else:
+                with target.open("rb") as f:
+                    f.seek(offset)
+                    raw = f.read(limit)
+                size = target.stat().st_size
+            Runs.record_observation(
+                owner,
+                "RunLog",
+                dict(path=str(target), offset=offset, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()),
+            )
+        return {"text": raw.decode("utf-8", errors="replace"), "next_offset": offset + len(raw), "size": size}
+
+    @mcp.tool()
+    def RunSnapshot(
+        run_id: str,
+        observer_token: str,
+        monitor: int = 0,
+        max_width: int = 0,
+        quality: int = 75,
+    ) -> list:
+        """Read-only screenshot and window list of the desktop held by this exact running run.
+
+        Requires the observer_token returned once by RunSubmit and a desktop claim held by
+        that run. Other owners' held claims still return host_busy; no input is sent.
+        """
+        from winremote import desktop
+
+        if not 1 <= quality <= 100 or max_width < 0 or monitor < 0:
+            raise ValueError("quality 1..100, max_width >=0 and monitor >=0 required")
+        runs = Runs()
+        with runs.operation("RunSnapshot", {"desktop": "exclusive"}, within=(run_id, observer_token)) as owner:
+            image = desktop.take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
+            windows = [
+                dict(handle=w.handle, title=w.title, width=w.width, height=w.height, x=w.rect[0], y=w.rect[1])
+                for w in desktop.enumerate_windows()
+            ]
+            receipt = dict(
+                monitor=monitor,
+                max_width=max_width,
+                jpeg_bytes=len(base64.b64decode(image)),
+                sha256=hashlib.sha256(base64.b64decode(image)).hexdigest(),
+                window_count=len(windows),
+            )
+            Runs.record_observation(owner, "RunSnapshot", receipt)
+        summary = dict(receipt, run_id=run_id, machine_id=owner["machine"]["id"], windows=windows)
+        return [
+            ImageContent(type="image", data=image, mimeType="image/jpeg"),
+            TextContent(type="text", text=json.dumps(summary)),
+        ]
 
     @mcp.tool()
     def UploadBegin(path: str, size: int, sha256: str) -> dict:
