@@ -68,6 +68,28 @@ full stdout/stderr and the final JSON receipt remain in `output_dir`.
 Owner labels provide attribution, not authentication or permission to cancel
 another person's work. Never infer ownership from a process name or start time.
 
+## Fixed claims and resident sessions
+
+The maintained client/server has no supported operation to amend, release or
+transfer a running run's resource claims. Claims remain held through execution
+and uncertain cleanup; changing an existing owner/request ID's specification is
+rejected rather than updating it. A resident run holding `desktop` exclusive
+therefore still blocks another desktop claimant even when its process is idle.
+Shared-machine isolation permits only compatible resources.
+
+Inspect RunStatus/RunList and coordinate with the actual owner to establish
+which phases need desktop interaction, which must preserve an uninterrupted
+native session, and when claims can naturally release. Continue compatible
+immutable reads and disjoint preparation; use the project's approved alternate
+machine for eligible checks, or wait for the conflicting phase to finish. Keep
+needed resources declared even when admitting concurrent diagnostics. Without
+a supported change in place, preserve the resident test and report the exact
+limitation; cancellation/restart needs the owner's authorization and must respect
+session-continuity acceptance. Editing queue state, detaching owned children or
+launching outside the queue is not a claim-release mechanism.
+
+## Process custody
+
 The worker survives client or MCP-server disconnection. On Windows a gated
 child joins its Job Object before the command can start; worker death closes
 the job. Recovery verifies absence before releasing claims. Local POSIX runs

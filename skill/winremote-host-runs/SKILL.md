@@ -32,6 +32,7 @@ Declare the resources the command actually shares or changes:
 | Situation | Admission |
 |---|---|
 | Independent workspaces, outputs and application state | Concurrent shared-machine runs |
+| Resident CLI/TUI waiting with negligible load and no desktop interaction | Shared-machine run; claim its actual paths, ports and application state |
 | Several readers of immutable state | Shared claim on that resource |
 | Shared checkout/cache writes, fixed outputs, port, desktop input or device settings | Exclusive claim on the affected resource |
 | A measurement or operation requires a quiet whole machine | `isolation: exclusive` |
@@ -43,6 +44,16 @@ application-state name where paths do not express the conflict. Path claims
 cover descendants. Separate checkouts alone do not isolate application data,
 ports or device state. Retain exclusive workspace access unless the command
 is known to leave that workspace immutable and writes to isolated outputs.
+
+Desktop ownership follows interaction: focus changes, desktop keyboard/mouse input,
+window management or desktop-dependent capture/automation require `desktop`
+exclusive. A resident terminal's existence alone does not require that claim.
+Plan bounded desktop phases separately from resident waits when the application's
+supported lifecycle permits it; preserve continuous native sessions when required.
+A visible game run may own `desktop` alongside a resident CLI that leaves focus
+and input alone and has disjoint claims. Hidden execution does not release an
+explicit desktop claim. For an existing overbroad reservation, use
+[fixed-claim coordination](references/operations.md#fixed-claims-and-resident-sessions).
 
 The queue admits compatible work concurrently. Older conflicting requests
 prevent starvation; disjoint requests may proceed. A queued whole-machine
@@ -74,12 +85,29 @@ use its approved route and record the actual machine.
 
 ## Machine-scoped measurements
 
-Performance benchmarks require whole-machine exclusive admission. Record the
-run's `machine.id`, hardware/runtime, workload/source, renderer, resolution,
-power mode and relevant host load with the measurement. Baseline and candidate
-must use the same machine and matched conditions. Results from different
-machines are separate series; do not combine them into a speedup/regression
-claim. Label cross-machine comparisons explicitly when they are the question.
+Choose admission from the measurement's required conditions:
+
+- Quiet-host acceptance and benchmarks whose contract requires whole-machine
+  isolation use `isolation: exclusive`. A negligible resident run still blocks
+  that admission until it completes and releases its claims.
+- When the user or project explicitly permits measurement alongside negligible
+  resident work, use `isolation: shared` with the measurement's actual resource
+  claims. Label the evidence as a concurrent diagnostic measurement, identify
+  the resident work and permission, and validate its load before and during the
+  measured window. Include CPU/GPU, I/O and input interference relevant to the
+  workload, including update/automation bursts. Record the observed load and any
+  agreed interference bound; if load is unverified or exceeds that bound, report
+  the limitation and obtain a valid measurement before accepting the result.
+  Co-residency permission does not override conflicting resource claims or an
+  explicit quiet-host requirement. Diagnostic evidence alone establishes neither
+  quiet-host acceptance nor a causal speedup.
+
+Record the run's `machine.id`, hardware/runtime, workload/source, renderer,
+resolution, power mode and relevant host load with every measurement. Baseline
+and candidate must use the same machine and matched conditions, including
+co-resident activity, before making a speedup/regression claim. Results from
+different machines are separate series; label cross-machine comparisons
+explicitly when they are the question.
 
 The queue controls participating agent workloads, not unrelated user programs
 or operating-system activity. Inspect the benchmark's load/validity evidence;
