@@ -262,7 +262,9 @@ class Runs:
                 with (out / "worker.log").open("ab") as log:
                     kwargs = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, close_fds=True)
                     if os.name == "nt":
-                        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                        # DETACHED_PROCESS can open Windows Terminal for venv Python
+                        # redirectors. Keep the independent worker console-free.
+                        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
                     else:
                         kwargs["start_new_session"] = True
                     subprocess.Popen([sys.executable, "-m", "winremote.run_worker", str(self.root), run_id], **kwargs)

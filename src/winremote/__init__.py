@@ -1,3 +1,3 @@
 """winremote-mcp: Windows Remote MCP Server."""
 
-__version__ = "0.4.23+hostruns.2"
+__version__ = "0.4.23+hostruns.3"

@@ -82,6 +82,55 @@ def finished(runs, run):
     return until(lambda: r if (r := runs.get(run["id"]))["state"] not in ("queued", "running") else None)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires a Windows interactive desktop")
+def test_hidden_run_does_not_open_a_worker_console(runs, tmp_path):
+    """Observe the real worker from before submission through command startup."""
+    import ctypes
+    import ctypes.wintypes as wintypes
+    import threading
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    stop = threading.Event()
+    observed = set()
+
+    @enum_proc
+    def inspect_window(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            name = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, name, len(name))
+            if name.value in ("PseudoConsoleWindow", "ConsoleWindowClass"):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                try:
+                    if os.getpid() in (p.pid for p in psutil.Process(pid.value).parents()):
+                        observed.add((name.value, pid.value))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        return True
+
+    def observe():
+        while not stop.is_set():
+            user32.EnumWindows(inspect_window, 0)
+            stop.wait(0.005)
+
+    observer = threading.Thread(target=observe)
+    observer.start()
+    try:
+        run, started, release = held(runs, tmp_path, "hidden-console", hidden=True)
+        until(started.exists)
+        release.touch()
+        result = finished(runs, run)
+    finally:
+        stop.set()
+        observer.join()
+    assert result["state"] == "succeeded" and result["cleanup"] == "complete"
+    assert not observed, f"hidden run opened console windows: {observed}"
+
+
 def test_independent_runs_overlap_and_survive_client_recreation(runs, tmp_path):
     a, am, ar = held(runs, tmp_path, "a")
     b, bm, br = held(runs, tmp_path, "b")
