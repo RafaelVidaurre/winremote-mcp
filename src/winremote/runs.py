@@ -105,6 +105,12 @@ class Runs:
         self.root = (root or state_root()).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root / "runs.sqlite3"
+        # Write-ahead logging: status reads never wait on a write, and writes never wait on
+        # readers. With rollback journaling every poll took the write lock, and under several
+        # agents' polling a worker's own state update timed out ("database is locked") and the
+        # run failed. The mode persists in the database file.
+        with contextlib.closing(sqlite3.connect(self.db, timeout=60)) as db:
+            db.execute("PRAGMA journal_mode=WAL")
         with self.connect() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS runs "
@@ -125,10 +131,11 @@ class Runs:
         }
 
     @contextlib.contextmanager
-    def connect(self):
-        db = sqlite3.connect(self.db, timeout=15)
+    def connect(self, write=True):
+        """One transaction: writers take the write lock up front; readers only read a snapshot."""
+        db = sqlite3.connect(self.db, timeout=60)
         try:
-            db.execute("BEGIN IMMEDIATE")
+            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield db
             db.commit()
         except BaseException:
@@ -142,11 +149,18 @@ class Runs:
         return [json.loads(r[0]) for r in db.execute("SELECT data FROM runs ORDER BY sequence")]
 
     @staticmethod
+    def _active_rows(db):
+        """The runs admission and recovery reason about, without parsing the whole history."""
+        states = sorted(ACTIVE)
+        query = "SELECT data FROM runs WHERE json_extract(data, '$.state') IN (%s) ORDER BY sequence" % ",".join("?" * len(states))
+        return [json.loads(r[0]) for r in db.execute(query, states)]
+
+    @staticmethod
     def _save(db, run):
         db.execute("UPDATE runs SET data=? WHERE id=?", (json.dumps(run), run["id"]))
 
     def get(self, run_id: str) -> dict:
-        with self.connect() as db:
+        with self.connect(write=False) as db:
             row = db.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None:
             raise ValueError(f"unknown run: {run_id}")
@@ -164,10 +178,8 @@ class Runs:
 
     def list(self, active_only=True, limit=50) -> dict:
         self.recover()
-        with self.connect() as db:
-            rows = self._rows(db)
-        if active_only:
-            rows = [r for r in rows if r["state"] in ACTIVE]
+        with self.connect(write=False) as db:
+            rows = self._active_rows(db) if active_only else self._rows(db)
         return {"machine": self.machine, "runs": rows[-min(max(limit, 1), 200) :]}
 
     def submit(
@@ -229,11 +241,14 @@ class Runs:
             raise ValueError("request_id must have 1..200 characters")
         with self.connect() as db:
             if request_id:
-                for old in self._rows(db):
-                    if old.get("request_id") == request_id and old["owner"] == owner:
-                        if old["fingerprint"] != fingerprint:
-                            raise ValueError("request_id already names a different request")
-                        return old
+                for (data,) in db.execute(
+                    "SELECT data FROM runs WHERE json_extract(data, '$.request_id')=? AND json_extract(data, '$.owner')=?",
+                    (request_id, owner),
+                ):
+                    old = json.loads(data)
+                    if old["fingerprint"] != fingerprint:
+                        raise ValueError("request_id already names a different request")
+                    return old
             run_id = uuid.uuid4().hex
             out = self.root / run_id
             out.mkdir()
@@ -276,9 +291,9 @@ class Runs:
     def admit(self, run_id: str) -> bool:
         self.recover()
         with self.connect() as db:
-            rows = self._rows(db)
-            current = next(r for r in rows if r["id"] == run_id)
-            if current["state"] != "queued":
+            rows = self._active_rows(db)
+            current = next((r for r in rows if r["id"] == run_id), None)
+            if current is None or current["state"] != "queued":
                 return False
             if current["cancel_requested"]:
                 current.update(state="cancelled", cleanup="complete", finished_at=time.time())
@@ -317,9 +332,7 @@ class Runs:
     def recover(self):
         """Reconcile a dead worker; uncertain cleanup retains every resource claim."""
         with self.connect() as db:
-            for run in self._rows(db):
-                if run["state"] not in ACTIVE:
-                    continue
+            for run in self._active_rows(db):
                 if run.get("worker_pid") and alive(run["worker_pid"], run["worker_birth"]):
                     continue
                 if not run.get("worker_pid") and time.time() - run["created_at"] < 30:
@@ -385,11 +398,12 @@ class Runs:
         )
         owner = None
         with self.connect() as db:
-            rows = self._rows(db)
+            rows = self._active_rows(db)
             if within is None:
                 blockers = [r for r in rows if r["state"] in ACTIVE and conflicts(run, r)]
             else:
-                owner = self._observed(rows, within, run["resources"])
+                held = db.execute("SELECT data FROM runs WHERE id=?", (within[0],)).fetchone()
+                owner = self._observed([json.loads(held[0])] if held else [], within, run["resources"])
                 run["observing"] = owner["id"]
                 blockers = [r for r in rows if r["id"] != owner["id"] and r["state"] in HELD and conflicts(run, r)]
             if blockers:

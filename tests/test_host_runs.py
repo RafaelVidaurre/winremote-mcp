@@ -586,3 +586,16 @@ def test_admitted_run_receipt_survives_token_persistence_failure_without_duplica
     assert len([r for r in runs.list(False)["runs"] if r.get("request_id") == "persist-fails"]) == 1
     runs.cancel(result["id"], "test/custody")
     assert finished(runs, result)["cleanup"] == "complete"
+
+
+def test_an_open_status_read_never_blocks_a_state_update(runs, tmp_path):
+    """Several agents poll status while workers record state: a reader must not hold the
+    write lock, or the worker's update times out ("database is locked") and its run fails."""
+    run = runs.submit(command=[sys.executable, "-c", 'print("hello")'], cwd=str(tmp_path), owner="test/a")
+    assert finished(runs, run)["state"] == "succeeded"
+    with runs.connect(write=False) as reader:
+        reader.execute("SELECT data FROM runs").fetchall()
+        started = time.monotonic()
+        runs.update(run["id"], note="written while a status read is open")
+        assert time.monotonic() - started < 5
+    assert runs.get(run["id"])["note"] == "written while a status read is open"
