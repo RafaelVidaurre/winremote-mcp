@@ -27,7 +27,7 @@ That's it! Your Windows MCP server is now running on `http://127.0.0.1:8090` and
 
 ## 🤖 Agent Integrations
 
-This fork adds [durable runs and artifact transfer](docs/host-runs.md):
+This fork of [winremote-mcp](https://github.com/dddabtc/winremote-mcp) adds [durable runs and artifact transfer](docs/host-runs.md):
 `winremote-client` submits owned jobs with conflict-aware concurrency, transfers
 verified binary files over MCP, and stages source into new checkouts. Install the
 same release on the Windows machine and on every agent machine:
