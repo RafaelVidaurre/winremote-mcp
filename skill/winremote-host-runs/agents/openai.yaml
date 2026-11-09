@@ -1,3 +1,0 @@
-interface:
-  display_name: "Owned Host Runs"
-  short_description: "Run compatible workloads concurrently through winremote"

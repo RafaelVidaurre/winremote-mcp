@@ -27,9 +27,18 @@ That's it! Your Windows MCP server is now running on `http://127.0.0.1:8090` and
 
 ## 🤖 Agent Integrations
 
-This maintained build includes [durable runs and artifact transfer](docs/host-runs.md):
+This fork adds [durable runs and artifact transfer](docs/host-runs.md):
 `winremote-client` submits owned jobs with conflict-aware concurrency, transfers
-verified binary files over MCP, and stages source into new checkouts.
+verified binary files over MCP, and stages source into new checkouts. Install the
+same release on the Windows machine and on every agent machine:
+
+```bash
+uv tool install "git+https://github.com/RafaelVidaurre/winremote-mcp@v0.4.23-hostruns.4"
+```
+
+Agents use it through the `winremote-host-runs` skill in
+[furanku-skills](https://github.com/RafaelVidaurre/furanku-skills/tree/main/skills/winremote-host-runs),
+which also covers setting up a Windows host.
 
 winremote-mcp works with MCP-compatible AI agents and clients. Client-specific setup guides live in this repo:
 
