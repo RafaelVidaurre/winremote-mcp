@@ -11,7 +11,10 @@ from pathlib import Path
 
 from winremote.runs import Runs, path_resource
 
-CHUNK_BYTES = 512 * 1024
+UPLOAD_CHUNK_BYTES = 512 * 1024
+# Legacy MCP replies include both text and structured copies of the base64 data.
+# 256 KiB encodes to ~350 KiB twice, leaving room below a 1 MiB SSE event cap.
+DOWNLOAD_CHUNK_BYTES = 256 * 1024
 
 
 def digest(path: Path) -> str:
@@ -55,11 +58,11 @@ class Artifacts:
                 "transfer_id": transfer_id,
                 "offset": part.stat().st_size,
                 "complete": False,
-                "chunk_bytes": CHUNK_BYTES,
+                "chunk_bytes": UPLOAD_CHUNK_BYTES,
             }
 
     def chunk(self, transfer_id: str, offset: int, data_base64: str) -> dict:
-        if len(data_base64) > (CHUNK_BYTES + 2) // 3 * 4:
+        if len(data_base64) > (UPLOAD_CHUNK_BYTES + 2) // 3 * 4:
             raise ValueError("chunk exceeds advertised chunk_bytes")
         data = base64.b64decode(data_base64, validate=True)
         info = json.loads(self._meta(transfer_id).read_text(encoding="utf-8"))
@@ -98,7 +101,7 @@ class Artifacts:
                 path=str(target),
                 size=st.st_size,
                 sha256=digest(target),
-                chunk_bytes=CHUNK_BYTES,
+                chunk_bytes=DOWNLOAD_CHUNK_BYTES,
                 revision=f"{st.st_size}:{st.st_mtime_ns}",
             )
 
@@ -112,5 +115,5 @@ class Artifacts:
                 raise ValueError("artifact changed during download")
             with target.open("rb") as f:
                 f.seek(offset)
-                data = f.read(CHUNK_BYTES)
+                data = f.read(DOWNLOAD_CHUNK_BYTES)
             return dict(offset=offset, data_base64=base64.b64encode(data).decode(), bytes=len(data))
