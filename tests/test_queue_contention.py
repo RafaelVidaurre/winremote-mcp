@@ -157,3 +157,50 @@ def test_failed_parent_bookkeeping_does_not_release_a_spawned_worker(tmp_path):
     retained = runs.list()["runs"]
     assert len(retained) == 1
     assert retained[0]["state"] == "queued" and retained[0]["cleanup"] == "pending"
+
+
+def test_recovery_probes_shared_process_once_per_pass_but_rechecks_next_pass(tmp_path):
+    from winremote.runs import alive
+
+    runs = Runs(tmp_path / "state")
+    first = queued(runs, tmp_path, request_id="first")
+    second = queued(runs, tmp_path, request_id="second")
+    with mock.patch("winremote.runs.alive", wraps=alive) as probe:
+        runs.recover()
+        assert probe.call_count == 1
+        runs.recover()
+        assert probe.call_count == 2
+    # Cached success must not outlive a recovery pass and conceal a dead worker.
+    with mock.patch("winremote.runs.alive", return_value=False):
+        runs.recover()
+    assert all(runs.get(r["id"])["state"] == "interrupted" for r in (first, second))
+
+
+def test_windows_liveness_uses_identity_without_enumerating_threads():
+    from winremote.runs import alive
+
+    process = psutil.Process()
+    with mock.patch("winremote.runs.sys", mock.Mock(platform="win32")):
+        with mock.patch.object(psutil.Process, "status", side_effect=AssertionError("thread enumeration")):
+            assert alive(process.pid, process.create_time())
+            assert not alive(process.pid, process.create_time() - 10)
+
+
+def test_suspended_process_retains_custody_until_it_exits():
+    import subprocess
+    import sys
+
+    from winremote.runs import alive
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    process = psutil.Process(child.pid)
+    birth = process.create_time()
+    try:
+        process.suspend()
+        assert alive(child.pid, birth)
+        assert not alive(child.pid, birth - 10)
+    finally:
+        process.resume()
+        child.terminate()
+        child.wait(timeout=10)
+    assert not alive(child.pid, birth)

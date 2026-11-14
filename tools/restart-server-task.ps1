@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$TaskName,
     [Parameter(Mandatory=$true)][int]$Port,
-    [Parameter(Mandatory=$true)][string]$ExpectedCommandFragment
+    [Parameter(Mandatory=$true)][string]$ExpectedCommandFragment,
+    [ValidateRange(1,600)][int]$StartupTimeoutSeconds = 120
 )
 $ErrorActionPreference = 'Stop'
 $listener = @(Get-NetTCPConnection -LocalPort $Port -State Listen)
@@ -34,7 +35,7 @@ do {
 } while ([DateTime]::UtcNow -lt $deadline)
 if ($listeners.Count) { throw 'Original listener did not close within 15 seconds' }
 Start-ScheduledTask -TaskName $TaskName
-$deadline = [DateTime]::UtcNow.AddSeconds(25)
+$deadline = [DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
 do {
     Start-Sleep -Milliseconds 500
     $new = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
