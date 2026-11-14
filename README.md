@@ -9,6 +9,10 @@ worker code. New workers retain their children through queue read errors, retry
 cancellation reads, and still enforce their original timeouts; diagnostics go to
 the run's `worker.log`.
 
+RunSubmit defaults its working-directory claim to shared, so an omitted option
+cannot turn a utility directory into a host-wide queue barrier. Declare mutable
+paths explicitly, or request exclusive workspace access when that is intended.
+
 
 [中文说明](README.zh-CN.md) | [English README](README.md)
 

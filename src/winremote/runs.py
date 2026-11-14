@@ -207,7 +207,7 @@ class Runs:
         *,
         resources: dict | None = None,
         isolation="shared",
-        workspace_access="exclusive",
+        workspace_access="shared",
         timeout=60.0,
         queue_timeout=1800.0,
         request_id: str | None = None,

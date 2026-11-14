@@ -40,7 +40,7 @@ def register(mcp):
         owner: str,
         resources: dict[str, str] | None = None,
         isolation: str = "shared",
-        workspace_access: str = "exclusive",
+        workspace_access: str = "shared",
         timeout: float = 60,
         queue_timeout: float = 1800,
         request_id: str | None = None,
@@ -49,7 +49,7 @@ def register(mcp):
     ) -> dict:
         """Queue an owned argv command and return immediately. Compatible resource claims overlap.
 
-        Cwd is exclusive by default; shared requires an immutable workspace and isolated outputs.
+        Cwd is shared by default. Claim mutated paths explicitly, or request exclusive workspace access.
         isolation=exclusive drains earlier runs and blocks later ones for whole-machine measurements.
         Name shared/exclusive resources for ports, desktop, devices and mutable paths (path:absolute).
         owner identifies project/session. Reuse request_id only to retry the identical submission.
@@ -229,7 +229,7 @@ def shell(command: str, timeout: int, cwd: str) -> str:
         owner,
         timeout=timeout,
         queue_timeout=timeout,
-        workspace_access="exclusive",
+        workspace_access="shared",
     )
     if current:
         current.run_id = run["id"]

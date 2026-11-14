@@ -214,7 +214,13 @@ def test_cancel_kills_owned_descendant_and_preserves_peer(runs, tmp_path):
 
 
 def test_execution_deadline_and_queued_cancellation(runs, tmp_path):
-    a = runs.submit([sys.executable, "-c", "import time; time.sleep(60)"], str(tmp_path), "test/a", timeout=0.3)
+    a = runs.submit(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        str(tmp_path),
+        "test/a",
+        timeout=0.3,
+        workspace_access="exclusive",
+    )
     b = runs.submit([sys.executable, "-c", "raise SystemExit(99)"], str(tmp_path), "test/b")
     runs.cancel(b["id"], "test/b")
     assert finished(runs, b)["state"] == "cancelled"
@@ -599,3 +605,20 @@ def test_an_open_status_read_never_blocks_a_state_update(runs, tmp_path):
         runs.update(run["id"], note="written while a status read is open")
         assert time.monotonic() - started < 5
     assert runs.get(run["id"])["note"] == "written while a status read is open"
+
+
+def test_mcp_submission_defaults_cwd_to_shared(runs, tmp_path):
+    mcp = FastMCP("default-workspace")
+    register(mcp)
+
+    async def invoke():
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "RunSubmit",
+                {"command": [sys.executable, "-c", "pass"], "cwd": str(tmp_path), "owner": "test/default-cwd"},
+            )
+            return result.structured_content
+
+    receipt = asyncio.run(invoke())
+    assert receipt["resources"][path_resource(str(tmp_path))] == "shared"
+    assert finished(runs, receipt)["state"] == "succeeded"
