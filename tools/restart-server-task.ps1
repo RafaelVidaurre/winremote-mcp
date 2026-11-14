@@ -3,9 +3,15 @@ param(
     [Parameter(Mandatory=$true)][string]$TaskName,
     [Parameter(Mandatory=$true)][int]$Port,
     [Parameter(Mandatory=$true)][string]$ExpectedCommandFragment,
-    [ValidateRange(1,600)][int]$StartupTimeoutSeconds = 120
+    [ValidateRange(1,600)][int]$StartupTimeoutSeconds = 120,
+    [Parameter(Mandatory=$true)][string]$Python,
+    [Parameter(Mandatory=$true)][string]$RunRoot
 )
 $ErrorActionPreference = 'Stop'
+# Python points at the staged candidate. Active workers keep their already-loaded
+# supervisor through an upgrade, so old residents must finish before replacement.
+$preflight = & $Python -m winremote.maintenance --root $RunRoot
+if ($LASTEXITCODE -ne 0) { throw "Restart refused before touching the service: $preflight" }
 $listener = @(Get-NetTCPConnection -LocalPort $Port -State Listen)
 $ids = @($listener.OwningProcess | Select-Object -Unique)
 if ($ids.Count -ne 1) { throw 'Expected exactly one server listener' }

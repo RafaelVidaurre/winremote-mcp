@@ -1,5 +1,15 @@
 # WinRemote MCP — Run MCP Servers Remotely on Windows
 
+Service maintenance must use `tools/restart-server-task.ps1` with the staged
+candidate `-Python` and the host `-RunRoot`, after pausing submissions. It refuses
+before stopping the server if any active resident worker lacks metadata-outage
+protection (v6 and earlier workers): let those runs finish or have their owners
+save and stop them first. Restarting the service does not update already-running
+worker code. New workers retain their children through queue read errors, retry
+cancellation reads, and still enforce their original timeouts; diagnostics go to
+the run's `worker.log`.
+
+
 [中文说明](README.zh-CN.md) | [English README](README.md)
 
 [![PyPI version](https://img.shields.io/pypi/v/winremote-mcp)](https://pypi.org/project/winremote-mcp/)

@@ -6,6 +6,7 @@ import ctypes
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -85,7 +86,7 @@ def execute(root: Path, run_id: str):
     if os.name != "nt" and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
         raise RuntimeError("SIGCHLD must retain child exit status for safe process-group cleanup")
     runs = Runs(root)
-    runs.update(run_id, worker_pid=os.getpid(), worker_birth=psutil.Process().create_time())
+    runs.update(run_id, worker_pid=os.getpid(), worker_birth=psutil.Process().create_time(), metadata_outage_safe=True)
     while not runs.admit(run_id):
         if runs.get(run_id)["state"] != "queued":
             return
@@ -121,6 +122,7 @@ def execute(root: Path, run_id: str):
             child.stdin.write(b"go\n")
             child.stdin.close()
             deadline = time.monotonic() + run["timeout"]
+            next_metadata_warning = 0.0
             while True:
                 # Keep the POSIX group leader unreaped until group cleanup.
                 if os.name == "nt":
@@ -130,11 +132,27 @@ def execute(root: Path, run_id: str):
                 if ended:
                     status = "exited"
                     break
-                if runs.get(run_id)["cancel_requested"]:
-                    status = "cancelled"
-                    break
+                # A metadata outage is not authority to terminate the workload.
+                # Retain its job and claims, keep observing the child, and enforce
+                # the original timeout even while cancellation cannot be read.
                 if time.monotonic() >= deadline:
                     status = "timeout"
+                    break
+                try:
+                    cancelled = runs.get(run_id)["cancel_requested"]
+                except sqlite3.Error as exc:
+                    if time.monotonic() >= next_metadata_warning:
+                        print(
+                            f"Queue read unavailable; retaining run {run_id}: "
+                            f"{getattr(exc, 'sqlite_errorname', type(exc).__name__)}: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        next_metadata_warning = time.monotonic() + 30
+                    time.sleep(0.2)
+                    continue
+                if cancelled:
+                    status = "cancelled"
                     break
                 time.sleep(0.1)
     except BaseException as exc:

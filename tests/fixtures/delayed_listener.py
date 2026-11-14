@@ -54,4 +54,8 @@ p.stdin.write(
 )
 p.stdin.close()
 while True:
-    time.sleep(1)
+    # The real server and workers contend over the same WAL queue during shutdown.
+    # Exercise that topology, rather than an unrelated listening socket alone.
+    if len(sys.argv) > 2:
+        runs.list()
+    time.sleep(.01)
