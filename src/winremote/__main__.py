@@ -499,6 +499,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         cwd: Working directory. If provided, the command runs inside that directory.
     """
     from winremote.run_tools import shell
+
     return shell(command, timeout, cwd)
 
 
@@ -1670,6 +1671,7 @@ def _wrap_all_tools():
     # Skip wrapping the task management tools themselves
     from winremote.run_tools import RUN_TOOLS, protect_tool
     from winremote.taskmanager import TOOL_CATEGORIES
+
     skip = {"CancelTask", "GetTaskStatus", "GetRunningTasks"} | RUN_TOOLS
     for name, tool in _get_registered_tools().items():
         if name in skip:

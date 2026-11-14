@@ -28,7 +28,10 @@ records actual cleanup. Uncertain cleanup retains claims. External services or
 processes that deliberately escape containment require their own lifecycle.
 
 RunStatus/RunList preserve machine identity, command, ownership and evidence
-paths. RunCancel requests cancellation; inspect the eventual cleanup receipt.
+paths. Active listings include every active run; `limit` bounds terminal history only.
+Routine reads and blocked admission polls do not acquire the SQLite writer lock.
+Recovery checks process identity outside transactions and only updates an unchanged
+snapshot; a busy writer leaves its claims conservatively retained. RunCancel requests cancellation; inspect the eventual cleanup receipt.
 A repeated owner/request_id is idempotent only with an identical specification.
 Owner is attribution within the server's authenticated trust domain, not an
 additional authorization boundary.
@@ -71,4 +74,8 @@ termination can precede socket release. The script verifies the original
 listener's identity, waits for its socket to close, refuses a different owner,
 and requires a new listener. Verify RunList and an owned command after
 reconnecting. The Windows regression test in `tests/test_server_restart.py`
-uses a disposable task whose listening socket outlives the original process.
+uses a disposable task whose listening socket outlives the original process,
+and verifies that its real owned worker survives the restart and finishes normally.
+For a live upgrade, install the new runtime side by side and keep the previous
+runtime until its resident workers exit; replacing files beneath running workers
+is not covered by the restart guarantee.

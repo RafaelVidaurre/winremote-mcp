@@ -110,7 +110,7 @@ Create/edit `.cursor/mcp.json` in your project:
 # Take a screenshot
 "Take a screenshot of the current desktop"
 
-# Click at specific coordinates  
+# Click at specific coordinates
 "Click at position 500, 300"
 
 # Type text
@@ -170,7 +170,7 @@ Create/edit `.cursor/mcp.json` in your project:
 # Annotated screenshot
 "Take an annotated screenshot showing numbered labels on all clickable elements"
 
-# Multi-monitor support  
+# Multi-monitor support
 "Take a screenshot of monitor 2"
 ```
 
@@ -265,6 +265,7 @@ curl http://localhost:8090/health
 ```python
 # Monitor running tasks (via MCP client)
 "Show all currently running tasks"
+
 "Get status of task abc123"
 "Cancel task def456"
 ```

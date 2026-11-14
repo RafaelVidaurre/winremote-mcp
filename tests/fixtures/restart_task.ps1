@@ -1,7 +1,7 @@
-param([string]$TaskName, [string]$Python, [string]$Server, [string]$RestartScript, [int]$Port)
+param([string]$TaskName, [string]$Python, [string]$Server, [string]$RestartScript, [int]$Port, [string]$RunRoot)
 $ErrorActionPreference='Stop'
 if(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue){throw 'Fixture already exists'}
-$action=New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "--headless `"$Python`" `"$Server`" $Port"
+$action=New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "--headless `"$Python`" `"$Server`" $Port `"$RunRoot`""
 $principal=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal | Out-Null
 try {
