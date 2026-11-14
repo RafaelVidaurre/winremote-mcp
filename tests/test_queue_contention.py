@@ -44,7 +44,7 @@ def test_status_and_lists_do_not_wait_for_an_unrelated_writer(tmp_path):
 
 def test_blocked_admission_does_not_join_the_writer_queue(tmp_path):
     runs = Runs(tmp_path / "state")
-    holder = queued(runs, tmp_path)
+    holder = queued(runs, tmp_path, workspace_access="exclusive")
     runs.update(holder["id"], state="running")
     waiter = queued(runs, tmp_path)
     writer = sqlite3.connect(runs.db)
@@ -204,3 +204,13 @@ def test_suspended_process_retains_custody_until_it_exits():
         child.terminate()
         child.wait(timeout=10)
     assert not alive(child.pid, birth)
+
+
+def test_default_cwd_does_not_make_an_unrelated_waiter_a_host_barrier(tmp_path):
+    runs = Runs(tmp_path / "queue")
+    holder = queued(runs, tmp_path, resources={"asset:one": "exclusive"})
+    assert runs.admit(holder["id"])
+    waiter = queued(runs, tmp_path, resources={"asset:one": "exclusive"})
+    peer = queued(runs, tmp_path, resources={"asset:two": "exclusive"})
+    assert not runs.admit(waiter["id"])
+    assert runs.admit(peer["id"]), "unrelated work sharing only cwd must bypass the blocked waiter"
