@@ -42,7 +42,7 @@ def test_restart_waits_for_original_listener_release_and_preserves_owned_worker(
         ],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = json.loads(result.stdout)

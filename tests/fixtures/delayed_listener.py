@@ -7,6 +7,10 @@ import sys
 import time
 from pathlib import Path
 
+# Model a cold Python/server import longer than the former 25-second deadline.
+if len(sys.argv) > 2 and (Path(sys.argv[2]) / "resident-id").exists():
+    time.sleep(30)
+
 s = socket.socket()
 s.bind(("127.0.0.1", int(sys.argv[1])))
 s.listen()

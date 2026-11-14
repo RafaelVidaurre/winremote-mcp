@@ -93,7 +93,11 @@ def alive(pid: int | None, birth: float | None) -> bool:
         return False
     try:
         p = psutil.Process(pid)
-        return abs(p.create_time() - birth) < 0.01 and p.status() != psutil.STATUS_ZOMBIE
+        # Windows has no zombie state. psutil.status() enumerates threads to
+        # detect suspension, which must retain custody anyway.
+        return abs(p.create_time() - birth) < 0.01 and (
+            sys.platform == "win32" or p.status() != psutil.STATUS_ZOMBIE
+        )
     except psutil.NoSuchProcess:
         return False
     except psutil.AccessDenied:
@@ -366,9 +370,14 @@ class Runs:
         with self.connect(write=False) as db:
             snapshots = self._active_rows(db)
         candidates = []
+        identities = {}
         for run in snapshots:
-            if run.get("worker_pid") and alive(run["worker_pid"], run["worker_birth"]):
-                continue
+            identity = (run.get("worker_pid"), run.get("worker_birth"))
+            if identity[0]:
+                if identity not in identities:
+                    identities[identity] = alive(*identity)
+                if identities[identity]:
+                    continue
             if not run.get("worker_pid") and time.time() - run["created_at"] < 30:
                 continue  # worker startup handshake
             if run["kind"] == "lease" or run["state"] == "queued":
