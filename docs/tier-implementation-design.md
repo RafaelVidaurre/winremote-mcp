@@ -12,24 +12,55 @@ Allow users to control which tools are exposed via CLI flags, environment variab
 TOOL_TIERS = {
     # Tier 1: Read-only (low risk, default enabled)
     "tier1": {
-        "Snapshot", "AnnotatedSnapshot", "GetClipboard", "GetSystemInfo",
-        "ListProcesses", "FileList", "FileSearch", "RegRead", "ServiceList",
-        "TaskList", "EventLog", "Ping", "PortCheck", "NetConnections",
-        "OCR", "ScreenRecord", "Notification", "Wait",
-        "GetTaskStatus", "GetRunningTasks",
+        "Snapshot",
+        "AnnotatedSnapshot",
+        "GetClipboard",
+        "GetSystemInfo",
+        "ListProcesses",
+        "FileList",
+        "FileSearch",
+        "RegRead",
+        "ServiceList",
+        "TaskList",
+        "EventLog",
+        "Ping",
+        "PortCheck",
+        "NetConnections",
+        "OCR",
+        "ScreenRecord",
+        "Notification",
+        "Wait",
+        "GetTaskStatus",
+        "GetRunningTasks",
     },
-    
     # Tier 2: Interactive (medium risk, default enabled)
     "tier2": {
-        "Click", "Type", "Move", "Scroll", "Shortcut",
-        "FocusWindow", "MinimizeAll", "App", "Scrape", "CancelTask",
+        "Click",
+        "Type",
+        "Move",
+        "Scroll",
+        "Shortcut",
+        "FocusWindow",
+        "MinimizeAll",
+        "App",
+        "Scrape",
+        "CancelTask",
     },
-    
     # Tier 3: Destructive (high risk, default DISABLED)
     "tier3": {
-        "Shell", "FileRead", "FileWrite", "FileDownload", "FileUpload",
-        "KillProcess", "RegWrite", "ServiceStart", "ServiceStop",
-        "TaskCreate", "TaskDelete", "SetClipboard", "LockScreen",
+        "Shell",
+        "FileRead",
+        "FileWrite",
+        "FileDownload",
+        "FileUpload",
+        "KillProcess",
+        "RegWrite",
+        "ServiceStart",
+        "ServiceStop",
+        "TaskCreate",
+        "TaskDelete",
+        "SetClipboard",
+        "LockScreen",
     },
 }
 
@@ -101,6 +132,7 @@ TOOL_TIERS: dict[str, set[str]] = {
     "tier3": {...},
 }
 
+
 def get_enabled_tools(
     enable_tier3: bool = False,
     disable_tier2: bool = False,
@@ -117,10 +149,10 @@ def get_enabled_tools(
             enabled |= TOOL_TIERS["tier2"]
         if enable_tier3:
             enabled |= TOOL_TIERS["tier3"]
-    
+
     if exclude_tools:
         enabled -= exclude_tools
-    
+
     return enabled
 ```
 
@@ -131,8 +163,7 @@ def get_enabled_tools(
 @click.option("--disable-tier2", is_flag=True, help="Disable interactive tools (Click, Type, etc.)")
 @click.option("--tools", default="", help="Comma-separated list of tools to enable (overrides tiers)")
 @click.option("--exclude-tools", default="", help="Comma-separated list of tools to disable")
-def cli(ctx, transport, host, port, reload, auth_key, 
-        enable_tier3, disable_tier2, tools, exclude_tools):
+def cli(ctx, transport, host, port, reload, auth_key, enable_tier3, disable_tier2, tools, exclude_tools):
     ...
     enabled = get_enabled_tools(
         enable_tier3=enable_tier3,
@@ -140,7 +171,7 @@ def cli(ctx, transport, host, port, reload, auth_key,
         tools=set(tools.split(",")) if tools else None,
         exclude_tools=set(exclude_tools.split(",")) if exclude_tools else None,
     )
-    
+
     # Filter mcp._tool_manager._tools
     filter_tools(mcp, enabled)
 ```

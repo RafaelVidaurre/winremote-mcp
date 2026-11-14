@@ -54,6 +54,7 @@ pip install pytesseract
 
 ```python
 import pytesseract
+
 print(pytesseract.get_tesseract_version())
 ```
 

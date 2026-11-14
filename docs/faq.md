@@ -297,7 +297,7 @@ Use task management tools:
 # Check running tasks
 "Show all running tasks"
 
-# Cancel if needed  
+# Cancel if needed
 "Cancel task abc123"
 ```
 

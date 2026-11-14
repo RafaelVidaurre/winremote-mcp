@@ -33,7 +33,7 @@ verified binary files over MCP, and stages source into new checkouts. Install th
 same release on the Windows machine and on every agent machine:
 
 ```bash
-uv tool install "git+https://github.com/RafaelVidaurre/winremote-mcp@v0.4.23-hostruns.4"
+uv tool install "git+https://github.com/RafaelVidaurre/winremote-mcp@v0.4.23-hostruns.5"
 ```
 
 Agents use it through the `winremote-host-runs` skill in

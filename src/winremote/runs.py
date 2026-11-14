@@ -105,19 +105,27 @@ class Runs:
         self.root = (root or state_root()).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root / "runs.sqlite3"
-        # Write-ahead logging: status reads never wait on a write, and writes never wait on
-        # readers. With rollback journaling every poll took the write lock, and under several
-        # agents' polling a worker's own state update timed out ("database is locked") and the
-        # run failed. The mode persists in the database file.
+        # Ordinary clients read the initialized schema without taking a write lock.
+        # Only first use / migration writes; WAL persists in the database itself.
         with contextlib.closing(sqlite3.connect(self.db, timeout=60)) as db:
-            db.execute("PRAGMA journal_mode=WAL")
-        with self.connect() as db:
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS runs "
-                "(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE, data TEXT)"
-            )
-            db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
-            db.execute("INSERT OR IGNORE INTO metadata VALUES (?, ?)", ("machine_id", uuid.uuid4().hex))
+            initialized = db.execute("PRAGMA user_version").fetchone()[0] >= 1
+        if not initialized:
+            with contextlib.closing(sqlite3.connect(self.db, timeout=60)) as db:
+                db.execute("PRAGMA journal_mode=WAL")
+            with self.connect() as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS runs "
+                    "(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE, data TEXT)"
+                )
+                db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
+                db.execute("INSERT OR IGNORE INTO metadata VALUES (?, ?)", ("machine_id", uuid.uuid4().hex))
+                db.execute("CREATE INDEX IF NOT EXISTS runs_state ON runs(json_extract(data, '$.state'))")
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS runs_request ON runs("
+                    "json_extract(data, '$.request_id'), json_extract(data, '$.owner'))"
+                )
+                db.execute("PRAGMA user_version=1")
+        with self.connect(write=False) as db:
             machine_id = db.execute("SELECT value FROM metadata WHERE key=?", ("machine_id",)).fetchone()[0]
         self.machine = {
             "id": machine_id,
@@ -131,9 +139,9 @@ class Runs:
         }
 
     @contextlib.contextmanager
-    def connect(self, write=True):
+    def connect(self, write=True, timeout=60):
         """One transaction: writers take the write lock up front; readers only read a snapshot."""
-        db = sqlite3.connect(self.db, timeout=60)
+        db = sqlite3.connect(self.db, timeout=timeout)
         try:
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield db
@@ -145,14 +153,17 @@ class Runs:
             db.close()
 
     @staticmethod
-    def _rows(db):
-        return [json.loads(r[0]) for r in db.execute("SELECT data FROM runs ORDER BY sequence")]
+    def _rows(db, limit):
+        rows = db.execute("SELECT data FROM runs ORDER BY sequence DESC LIMIT ?", (limit,)).fetchall()
+        return [json.loads(r[0]) for r in reversed(rows)]
 
     @staticmethod
     def _active_rows(db):
         """The runs admission and recovery reason about, without parsing the whole history."""
         states = sorted(ACTIVE)
-        query = "SELECT data FROM runs WHERE json_extract(data, '$.state') IN (%s) ORDER BY sequence" % ",".join("?" * len(states))
+        query = "SELECT data FROM runs WHERE json_extract(data, '$.state') IN (%s) ORDER BY sequence" % ",".join(
+            "?" * len(states)
+        )
         return [json.loads(r[0]) for r in db.execute(query, states)]
 
     @staticmethod
@@ -179,8 +190,10 @@ class Runs:
     def list(self, active_only=True, limit=50) -> dict:
         self.recover()
         with self.connect(write=False) as db:
-            rows = self._active_rows(db) if active_only else self._rows(db)
-        return {"machine": self.machine, "runs": rows[-min(max(limit, 1), 200) :]}
+            # Active custody is never truncated: omitting an older resident could
+            # make clients believe its checkout, desktop or port is free.
+            rows = self._active_rows(db) if active_only else self._rows(db, min(max(limit, 1), 200))
+        return {"machine": self.machine, "runs": rows}
 
     def submit(
         self,
@@ -242,7 +255,8 @@ class Runs:
         with self.connect() as db:
             if request_id:
                 for (data,) in db.execute(
-                    "SELECT data FROM runs WHERE json_extract(data, '$.request_id')=? AND json_extract(data, '$.owner')=?",
+                    "SELECT data FROM runs WHERE json_extract(data, '$.request_id')=? "
+                    "AND json_extract(data, '$.owner')=?",
                     (request_id, owner),
                 ):
                     old = json.loads(data)
@@ -282,39 +296,57 @@ class Runs:
                         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
                     else:
                         kwargs["start_new_session"] = True
-                    subprocess.Popen([sys.executable, "-m", "winremote.run_worker", str(self.root), run_id], **kwargs)
+                    worker = subprocess.Popen(
+                        [sys.executable, "-m", "winremote.run_worker", str(self.root), run_id], **kwargs
+                    )
             except BaseException as exc:
                 self.update(run_id, state="failed", error=str(exc), cleanup="complete", finished_at=time.time())
                 raise
+            # Once Popen succeeded, a bookkeeping failure must never declare
+            # cleanup complete: the worker may already own a running child.
+            try:
+                birth = psutil.Process(worker.pid).create_time()
+            except psutil.NoSuchProcess:
+                pass  # It may already have completed; recovery handles failed startup.
+            else:
+                with self.connect() as db:
+                    current = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()[0])
+                    if current["state"] == "queued" and not current.get("worker_pid"):
+                        current.update(worker_pid=worker.pid, worker_birth=birth)
+                        self._save(db, current)
         return dict(self.get(run_id), observer_token=observer_token)
+
+    @staticmethod
+    def _admission(rows, run_id):
+        current = next((r for r in rows if r["id"] == run_id), None)
+        if current is None or current["state"] != "queued":
+            return None
+        if current["cancel_requested"]:
+            return dict(current, state="cancelled", cleanup="complete", finished_at=time.time())
+        if time.time() > current["created_at"] + current["queue_timeout"]:
+            return dict(current, state="expired", cleanup="complete", finished_at=time.time())
+        for other in rows:
+            if other["id"] == run_id:
+                break
+            if conflicts(current, other):
+                return None
+        if any(r["id"] != run_id and r["state"] in HELD and conflicts(current, r) for r in rows):
+            return None
+        return dict(current, state="running", started_at=time.time())
 
     def admit(self, run_id: str) -> bool:
         self.recover()
-        with self.connect() as db:
-            rows = self._active_rows(db)
-            current = next((r for r in rows if r["id"] == run_id), None)
-            if current is None or current["state"] != "queued":
+        # A blocked poll is read-only. Recheck under the writer lock before any
+        # grant, so concurrent submitters cannot both acquire a shared resource.
+        with self.connect(write=False) as db:
+            if self._admission(self._active_rows(db), run_id) is None:
                 return False
-            if current["cancel_requested"]:
-                current.update(state="cancelled", cleanup="complete", finished_at=time.time())
-            elif time.time() > current["created_at"] + current["queue_timeout"]:
-                current.update(state="expired", cleanup="complete", finished_at=time.time())
-            else:
-                for other in rows:
-                    if other["id"] == run_id:
-                        break
-                    if other["state"] in ACTIVE and conflicts(current, other):
-                        return False
-                if any(
-                    r["id"] != run_id and r["state"] in ("running", "cleanup_uncertain") and conflicts(current, r)
-                    for r in rows
-                ):
-                    return False
-                current.update(state="running", started_at=time.time())
-                self._save(db, current)
-                return True
+        with self.connect() as db:
+            current = self._admission(self._active_rows(db), run_id)
+            if current is None:
+                return False
             self._save(db, current)
-        return False
+            return current["state"] == "running"
 
     def cancel(self, run_id: str, owner: str) -> dict:
         run = self.get(run_id)
@@ -330,23 +362,40 @@ class Runs:
         return run
 
     def recover(self):
-        """Reconcile a dead worker; uncertain cleanup retains every resource claim."""
-        with self.connect() as db:
-            for run in self._active_rows(db):
-                if run.get("worker_pid") and alive(run["worker_pid"], run["worker_birth"]):
-                    continue
-                if not run.get("worker_pid") and time.time() - run["created_at"] < 30:
-                    continue  # worker startup handshake
-                if run["kind"] == "lease" or run["state"] == "queued":
-                    run.update(state="interrupted", cleanup="complete", finished_at=time.time())
-                else:
-                    from winremote.run_worker import tree_absent
+        """Probe outside transactions, then reconcile only an unchanged dead-worker snapshot."""
+        with self.connect(write=False) as db:
+            snapshots = self._active_rows(db)
+        candidates = []
+        for run in snapshots:
+            if run.get("worker_pid") and alive(run["worker_pid"], run["worker_birth"]):
+                continue
+            if not run.get("worker_pid") and time.time() - run["created_at"] < 30:
+                continue  # worker startup handshake
+            if run["kind"] == "lease" or run["state"] == "queued":
+                changes = dict(state="interrupted", cleanup="complete", finished_at=time.time())
+            else:
+                from winremote.run_worker import tree_absent
 
-                    if tree_absent(run):
-                        run.update(state="interrupted", cleanup="complete", finished_at=time.time())
-                    else:
-                        run.update(state="cleanup_uncertain", cleanup="uncertain")
-                self._save(db, run)
+                if tree_absent(run):
+                    changes = dict(state="interrupted", cleanup="complete", finished_at=time.time())
+                else:
+                    changes = dict(state="cleanup_uncertain", cleanup="uncertain")
+            if any(run.get(k) != v for k, v in changes.items()):
+                candidates.append((run, changes))
+        if not candidates:
+            return
+        try:
+            # Metadata requests never queue behind writers for housekeeping.
+            # Skipping a busy reconciliation retains claims conservatively.
+            with self.connect(timeout=0) as db:
+                for snapshot, changes in candidates:
+                    row = db.execute("SELECT data FROM runs WHERE id=?", (snapshot["id"],)).fetchone()
+                    if row and json.loads(row[0]) == snapshot:
+                        self._save(db, dict(snapshot, **changes))
+        except sqlite3.OperationalError as error:
+            if str(error) not in ("database is locked", "database table is locked"):
+                # Other database errors must remain visible.
+                raise
 
     @staticmethod
     def record_observation(owner: dict, tool: str, details: dict) -> None:

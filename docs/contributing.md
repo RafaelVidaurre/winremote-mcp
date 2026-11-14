@@ -117,37 +117,30 @@ Each MCP tool follows this pattern:
 from typing import Dict, Any, List
 from ..taskmanager import task_manager
 
+
 @task_manager.tool(category="desktop")  # or "file", "query", "shell", "network"
 def tool_name(param1: str, param2: int = 10) -> Dict[str, Any]:
     """
     Brief description of what this tool does.
-    
+
     Args:
         param1: Description of parameter
         param2: Optional parameter with default
-        
+
     Returns:
         Dict containing tool result
-        
+
     Raises:
         ValueError: When parameters are invalid
     """
     try:
         # Tool implementation
         result = do_something(param1, param2)
-        
-        return {
-            "success": True,
-            "result": result,
-            "message": f"Successfully processed {param1}"
-        }
-        
+
+        return {"success": True, "result": result, "message": f"Successfully processed {param1}"}
+
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"Failed to process {param1}"
-        }
+        return {"success": False, "error": str(e), "message": f"Failed to process {param1}"}
 ```
 
 ### Tool Categories
@@ -173,50 +166,48 @@ Tools are organized into categories that determine concurrency limits:
 ```python
 # src/winremote/tools/files.py
 
+
 @task_manager.tool(category="file")
 def file_hash(path: str, algorithm: str = "md5") -> Dict[str, Any]:
     """
     Calculate hash of a file.
-    
+
     Args:
         path: File path
         algorithm: Hash algorithm (md5, sha1, sha256)
-        
+
     Returns:
         Dict with file hash and metadata
     """
     import hashlib
     from pathlib import Path
-    
+
     try:
         if algorithm not in ["md5", "sha1", "sha256"]:
             raise ValueError(f"Unsupported algorithm: {algorithm}")
-            
+
         file_path = Path(path)
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {path}")
-            
+
         hash_func = getattr(hashlib, algorithm)()
-        
+
         with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_func.update(chunk)
-                
+
         return {
             "success": True,
             "result": {
                 "file": str(file_path),
-                "algorithm": algorithm, 
+                "algorithm": algorithm,
                 "hash": hash_func.hexdigest(),
-                "size": file_path.stat().st_size
-            }
+                "size": file_path.stat().st_size,
+            },
         }
-        
+
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 ```
 
 ## Writing Tests
@@ -232,33 +223,33 @@ import pytest
 from unittest.mock import patch, Mock
 from winremote.tools.files import file_hash
 
+
 class TestFileHash:
-    
-    @patch('winremote.tools.files.Path')
-    @patch('winremote.tools.files.open')
+    @patch("winremote.tools.files.Path")
+    @patch("winremote.tools.files.open")
     def test_file_hash_md5(self, mock_open, mock_path):
         # Setup mocks
         mock_file_path = Mock()
         mock_file_path.exists.return_value = True
         mock_file_path.stat.return_value.st_size = 1024
         mock_path.return_value = mock_file_path
-        
+
         mock_file = Mock()
         mock_file.read.side_effect = [b"test data", b""]
         mock_open.return_value.__enter__.return_value = mock_file
-        
+
         # Test the tool
         result = file_hash("test.txt", "md5")
-        
+
         # Assertions
         assert result["success"] is True
         assert "hash" in result["result"]
         assert result["result"]["algorithm"] == "md5"
         assert result["result"]["size"] == 1024
-        
+
     def test_file_hash_invalid_algorithm(self):
         result = file_hash("test.txt", "invalid")
-        
+
         assert result["success"] is False
         assert "Unsupported algorithm" in result["error"]
 ```
@@ -378,20 +369,17 @@ from ..taskmanager import task_manager
 
 logger = logging.getLogger(__name__)
 
+
 @task_manager.tool(category="file")
-def process_files(
-    directory: str, 
-    pattern: str = "*.txt", 
-    recursive: bool = False
-) -> Dict[str, Any]:
+def process_files(directory: str, pattern: str = "*.txt", recursive: bool = False) -> Dict[str, Any]:
     """
     Process files in a directory matching the given pattern.
-    
+
     Args:
         directory: Target directory path
         pattern: File matching pattern with wildcards
         recursive: Whether to search subdirectories
-        
+
     Returns:
         Dict containing processed file information
     """
@@ -399,9 +387,9 @@ def process_files(
         dir_path = Path(directory)
         if not dir_path.exists():
             raise FileNotFoundError(f"Directory not found: {directory}")
-            
+
         # Implementation here...
-        
+
     except Exception as e:
         logger.error(f"Failed to process files: {e}")
         return {"success": False, "error": str(e)}
