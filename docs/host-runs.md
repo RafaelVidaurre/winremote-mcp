@@ -7,7 +7,8 @@ JSON connection. `--local` uses a separate machine-local queue.
 
 RunSubmit accepts argv, an absolute cwd, owner, request_id, timeout,
 queue_timeout, isolation (`shared` or `exclusive`), workspace_access and a
-resource map (`shared` or `exclusive`). Cwd is exclusively claimed by default.
+resource map (`shared` or `exclusive`). Cwd is shared by default; declare mutated
+paths explicitly or request exclusive workspace access.
 Named resources must describe the same real object across clients: paths use
 `path:<absolute path>`, ports use `port:tcp:<number>`, desktop interaction uses
 `desktop`. Parent path claims conflict with descendants when either writes.
@@ -53,6 +54,23 @@ requests return observation_denied. Receipts go to the run's
 
 UploadBegin/Chunk/Finish and ArtifactInfo/Read provide resumable file transfer.
 The CLI handles bytes; neither agent context nor manual encoding is involved.
+Downloads use 256 KiB chunks: legacy MCP duplicates base64 in text and structured
+fields, so 512 KiB binary chunks exceeded newer clients' 1 MiB SSE event cap.
+Uploads retain 512 KiB chunks because their replies contain only a small receipt.
+Existing partial downloads resume and retain full SHA-256/length verification.
+
+For a server older than hostruns.7.1, a verified temporary client workaround is:
+
+```sh
+uv run --with 'fastmcp==3.2.4' --with 'mcp==1.28.1' \
+  --with 'winremote-mcp @ git+https://github.com/RafaelVidaurre/winremote-mcp.git@v0.4.23-hostruns.6' \
+  winremote-client download '<remote-path>' '<local-path>'
+```
+
+This isolates dependency versions without changing global installs. Updating
+only the client package does not shrink an older server's fixed chunks.
+`FileDownload` sends the entire file and is not a bounded-transfer alternative.
+
 Publication follows full length/hash verification and refuses an existing
 file with different content. Git staging uses these transfers and queues
 verification plus a new detached checkout; existing checkouts are never reset.
@@ -68,14 +86,20 @@ Run on Windows for native Job Object, worker-crash and PowerShell evidence.
 
 For a server installed as a Windows scheduled task, invoke
 `tools/restart-server-task.ps1` through RunSubmit with its exact task name,
-port and expected server command fragment. Check for unrelated work before
-maintenance. Console wrappers can leave their server alive, and process
-termination can precede socket release. The script verifies the original
+port, expected server command fragment, staged candidate `-Python`, and `-RunRoot`.
+Pause submissions and let legacy workers finish, or have their owners save and
+stop them. The preflight refuses those workers before touching the service;
+upgrading a server does not update code already loaded by resident workers.
+Console wrappers can leave their server alive, and process termination can precede socket release. The script verifies the original
 listener's identity, waits for its socket to close, refuses a different owner,
-and requires a new listener. Verify RunList and an owned command after
-reconnecting. The Windows regression test in `tests/test_server_restart.py`
-uses a disposable task whose listening socket outlives the original process,
-and verifies that its real owned worker survives the restart and finishes normally.
+and allows up to 120 seconds for a new listener (configurable). Verify RunList
+and an owned command after reconnecting. The Windows regression test in `tests/test_server_restart.py`
+uses a disposable task that continuously accesses the same SQLite queue, whose
+listening socket outlives the original process. It verifies that a protected
+worker survives a delayed restart and finishes normally. Protected workers retain
+their workloads through metadata read errors while enforcing the original deadline;
+cancellation resumes when metadata reads recover. Diagnostic error codes are in
+`worker.log`.
 For a live upgrade, install the new runtime side by side and keep the previous
 runtime until its resident workers exit; replacing files beneath running workers
 is not covered by the restart guarantee.
