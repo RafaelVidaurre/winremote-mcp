@@ -12,7 +12,7 @@ try {
         $listener=Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     } while(-not $listener -and [DateTime]::UtcNow -lt $until)
     if(-not $listener){throw 'Fixture did not start'}
-    & $RestartScript -TaskName $TaskName -Port $Port -ExpectedCommandFragment $Server
+    & $RestartScript -TaskName $TaskName -Port $Port -ExpectedCommandFragment $Server -Python $Python -RunRoot $RunRoot
 } finally {
     try {
         Stop-ScheduledTask -TaskName $TaskName
